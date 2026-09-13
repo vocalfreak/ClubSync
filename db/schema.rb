@@ -10,17 +10,17 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2026_09_13_033344) do
+ActiveRecord::Schema[8.0].define(version: 2026_09_13_150000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
   create_table "posts", force: :cascade do |t|
     t.string "shortcode", null: false
-    t.string "account", null: false
-    t.string "post_type", null: false
+    t.string "account"
+    t.string "post_type"
     t.text "caption"
-    t.string "source_url", null: false
-    t.datetime "posted_at", null: false
+    t.string "source_url"
+    t.datetime "posted_at"
     t.jsonb "raw_payload", null: false
     t.integer "status", default: 0, null: false
     t.datetime "created_at", null: false

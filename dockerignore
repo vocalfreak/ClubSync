@@ -1,0 +1,14 @@
+.git
+.env
+.env.*
+log/*
+!log/.keep
+tmp/*
+!tmp/.keep
+storage/*
+!storage/.keep
+node_modules
+.bundle
+vendor/bundle
+public/assets
+public/packs

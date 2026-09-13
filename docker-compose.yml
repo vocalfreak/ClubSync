@@ -1,0 +1,52 @@
+# Explicit project name: makes the network name (clubsync_default) and any
+# auto-named volumes predictable regardless of what directory this lives in,
+# so it can't accidentally collide with the ProPro staging compose project
+# on the same box.
+name: clubsync
+
+services:
+  app:
+    build: .
+    container_name: clubsync_app
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_HOST: db
+    ports:
+      # Host-side port, bound to loopback only — confirm 3010 is actually
+      # free on the E5440 (check `docker ps` / `ss -tlnp` first; ProPro
+      # staging's compose setup may already be claiming a port in this
+      # range) before first run. Loopback-only because Tailscale Funnel
+      # only ever proxies to 127.0.0.1 — no need to also expose this on
+      # the LAN.
+      - "127.0.0.1:3010:3000"
+    volumes:
+      - .:/app
+      - bundle_cache:/usr/local/bundle
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    container_name: clubsync_db
+    environment:
+      POSTGRES_USER: clubsync
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: clubsync_production
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clubsync"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    # No host port mapping — the app container reaches it over the
+    # clubsync_default network at hostname `db`; nothing outside this
+    # compose project (including ProPro's Postgres) can touch it.
+
+volumes:
+  pg_data:
+  bundle_cache:
