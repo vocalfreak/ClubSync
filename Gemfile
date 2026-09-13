@@ -23,6 +23,9 @@ gem "jbuilder"
 # Windows does not include zoneinfo files, so bundle the tzinfo-data gem
 gem "tzinfo-data", platforms: %i[ windows jruby ]
 
+# Use for object/image storage
+gem "aws-sdk-s3"
+
 # All runtime config comes from the UNIX environment
 # but we use dotenv to store that in files for
 # development and testing
