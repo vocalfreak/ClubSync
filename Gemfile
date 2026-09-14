@@ -4,7 +4,7 @@ source "https://rubygems.org"
 gem "rails", "~> 8.0.2"
 # ActiveSupport::JSON.encode passes quirks_mode: to JSON.generate, which
 # json 3.x (bundled with Ruby 3.4) removed — pin to 2.x so jsonb columns work.
-gem "json", "~> 2.12"
+gem "json", "~> 3.0"
 # The modern asset pipeline for Rails [https://github.com/rails/propshaft]
 gem "propshaft"
 # Use postgresql as the database for Active Record
