@@ -6,4 +6,6 @@ class Post < ApplicationRecord
     rejected:     3, # adapter found structural problems (missing/malformed required field, unsupported type)
     failed:       4  # transient error elsewhere in the pipeline (retryable)
   }
+
+  has_many :images, -> { order(:position) }, dependent: :destroy
 end

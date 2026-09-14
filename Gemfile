@@ -2,6 +2,9 @@ source "https://rubygems.org"
 
 # Bundle edge Rails instead: gem "rails", github: "rails/rails", branch: "main"
 gem "rails", "~> 8.0.2"
+# ActiveSupport::JSON.encode passes quirks_mode: to JSON.generate, which
+# json 3.x (bundled with Ruby 3.4) removed — pin to 2.x so jsonb columns work.
+gem "json", "~> 2.12"
 # The modern asset pipeline for Rails [https://github.com/rails/propshaft]
 gem "propshaft"
 # Use postgresql as the database for Active Record
@@ -25,11 +28,12 @@ gem "tzinfo-data", platforms: %i[ windows jruby ]
 
 # Use for object/image storage
 gem "aws-sdk-s3"
+gem "ruby-vips"
 
 # All runtime config comes from the UNIX environment
 # but we use dotenv to store that in files for
 # development and testing
-gem "dotenv-rails", groups: [:development, :test]
+gem "dotenv-rails", groups: [ :development, :test ]
 
 # Use the database-backed adapters for Rails.cache, Active Job, and Action Cable
 gem "solid_cache"
@@ -65,6 +69,9 @@ group :development, :test do
 
   # Omakase Ruby styling [https://github.com/rails/rubocop-rails-omakase/]
   gem "rubocop-rails-omakase", require: false
+
+  gem "factory_bot_rails"
+  gem "faker"
 end
 
 group :development do

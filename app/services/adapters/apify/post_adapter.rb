@@ -3,7 +3,26 @@ module Adapters
     # Maps one raw post hash from Apify's Instagram Post Scraper into a
     # canonical Post-shaped attribute hash. Pure mapping + shape validation;
     # never touches the database and never raises on malformed input.
+    # Never decides Post#status — that's PostLoader's job.
     class PostAdapter
+      class Result
+        attr_reader :attributes, :errors
+
+        def initialize(attributes:, errors:, fatal:)
+          @attributes = attributes
+          @errors = errors
+          @fatal = fatal
+        end
+
+        def valid?
+          !fatal? && errors.empty?
+        end
+
+        def fatal?
+          @fatal
+        end
+      end
+
       VALID_POST_TYPES = %w[Image Sidecar].freeze
 
       SHORTCODE_REQUIRED = "shortcode is required".freeze
@@ -12,20 +31,14 @@ module Adapters
       SOURCE_URL_INVALID = "source_url (url) must be an http(s) URL".freeze
       POSTED_AT_INVALID = "posted_at (timestamp) must be a parseable ISO8601 string".freeze
 
-      def self.call(raw_hash)
-        new(raw_hash).call
-      end
-
-      def initialize(raw_hash)
+      def parse_post(raw_hash)
         @raw = raw_hash.is_a?(Hash) ? raw_hash : {}
         @attributes = {}
         @errors = []
-      end
 
-      def call
         shortcode = @raw["shortCode"]
         unless shortcode.is_a?(String) && !shortcode.strip.empty?
-          return Adapters::Result.new(attributes: nil, errors: [ SHORTCODE_REQUIRED ], fatal: true)
+          return Result.new(attributes: nil, errors: [ SHORTCODE_REQUIRED ], fatal: true)
         end
 
         @attributes[:shortcode] = shortcode
@@ -37,9 +50,8 @@ module Adapters
         map_posted_at
 
         @attributes[:raw_payload] = @raw
-        @attributes[:status] = @errors.empty? ? :pending : :rejected
 
-        Adapters::Result.new(attributes: @attributes, errors: @errors, fatal: false)
+        Result.new(attributes: @attributes, errors: @errors, fatal: false)
       end
 
       private

@@ -1,7 +1,7 @@
 FROM ruby:3.3-slim
 
 # build-essential + libpq-dev: native gem compilation (pg, etc.)
-# libvips-dev: required at runtime by ruby-vips (1080px resize step + Phase 2 dHash)
+# libvips-dev: required at runtime by ruby-vips for image reisze and dHash
 # git/curl: bundler sometimes needs these for git-sourced gems / healthchecks
 RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     build-essential \

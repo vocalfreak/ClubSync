@@ -1,6 +1,6 @@
 # ClubSync — Architecture & Implementation Master Plan
 
-*Last updated: September 13, 2026*
+*Last updated: September 14, 2026*
 
 ## 1. Goal
 
@@ -13,6 +13,9 @@ Ingest event posts from ~41 Instagram accounts, extract structured event data (d
 | Component | Decision | Replaces (original doc) |
 |---|---|---|
 | Media storage | Backblaze B2 (S3-compatible), via a thin `ObjectStore` wrapper (`put`/`get_url`) | Self-hosted MinIO on the E5440 |
+| Media processing (resize/compress) | Folded into the same ingestion pass, synchronous, run immediately after the adapter persists the `Post` row (not before) — avoids any queueing delay before Instagram's signed `displayUrl` expires. Each image resized to 1080px max width and re-encoded as WebP via `ruby-vips` (confirmed a valid Gemini vision input MIME type). Uploaded via the existing `ObjectStore`, now passing `content_type: "image/webp"` explicitly since it otherwise defaults to JPEG. Per-image metadata (`b2_key`, dimensions, byte size, ordinal position, a nullable `dhash` for Phase 2) lands in a new `images` table — one row per image, so a `Sidecar` post's images (Instagram caps carousels at 10, so no extra cap needed) are properly modeled rather than crammed into an array column. Only the processed bytes are kept — no original retained, same "Instagram is the source of truth" logic already used to justify skipping Postgres backups. Note: `source_url` (the permalink) and the actual expiring image URL are different fields — the latter is `raw_payload["displayUrl"]` (`Image` posts) or each `raw_payload["childPosts"][i]["displayUrl"]` (`Sidecar` posts); nothing reads these yet | New — Phase 1 checklist item was underspecified (no storage shape, no failure semantics) |
+| Media processing — atomicity & retry | All of a post's images are fetched/resized/uploaded inside one DB transaction: either every `images` row for that post gets written, or none do. On any failure (expired URL, corrupt file, network error), the post's status becomes/stays `failed` and its `raw_payload` is still refreshed to whatever was just scraped. Retry is passive, not a dedicated job: the same account gets re-scraped every 2 days regardless, so a `failed` post picked up again in a later run (with a fresh, unexpired `displayUrl`) is simply re-attempted; a post already `done`/`needs_review`/`rejected` is left alone. Gets resilience against transient failures for the cost of one status check, no new scheduling machinery | New — resolves "what retries a failed post?", previously unspecified |
+| "Prune" (compress/prune before B2) | Descoped for v1. B2 doesn't auto-delete anything when the 10GB free tier is exceeded — it either bills (~$0.007/GB/month) or, with a hard cap and no payment method, rejects new uploads (a pipeline failure, not silent data loss). At WebP/1080px volume across 41 accounts every 2 days, reaching that threshold is far off. Revisit only if B2 usage becomes a real line item — options then are Backblaze's basic lifecycle (hide/delete) rules, or app-level deletion of images tied to past events | Was assumed to be a needed mechanic; turned out not to be |
 | Compute / orchestration | Self-hosted on the revived Dell Latitude E5440, cron-triggered, containerized via Docker + Compose (`app` + `db` services). The same box also hosts ProPro's *staging* environment (separate containers, separate Postgres instance) — the two workloads don't overlap in a way that stresses the hardware (ClubSync's cron job is bursty and network-bound; ProPro staging traffic is light), confirmed by intent to spot-check with `docker stats`/`htop` under real concurrent load. Heroku (GitHub Student Pack credit) was considered again but reserved for ProPro *production* instead, since that has real coordinator/lecturer/student users who benefit more from managed uptime — staging carries a lower uptime bar so co-locating it here is an accepted trade-off | Was briefly considered for Heroku; reverted — see Section 4 |
 | Remote access / management | Tailscale (SSH into the E5440 from anywhere, no port-forwarding); lid-close sleep already disabled. This is for your own admin/SSH access — separate from the public-facing path below, which reaches the app over the open internet, not the tailnet | N/A — new since last revision |
 | Database | Postgres, self-hosted on the E5440, in its own container — kept separate from ProPro's Postgres instance since ProPro is a real project with a real team. Backups are explicitly out of scope for v1: Instagram is the source of truth for the underlying content, so losing this DB costs a re-scrape + re-extraction pass (time, some free-tier API calls), not permanent data loss — a materially different risk than ProPro, which holds data with no external copy | Was an open gap ("has to be backed up manually"); resolved as intentionally deferred, not forgotten |
@@ -39,12 +42,18 @@ Media storage stays unaffected by any of this — B2 is already off-box, so ther
 - [X] Apify integration + secrets (`.env`, git-ignored, `chmod 600`)
 - [X] Adapter layer: raw JSON → canonical Post struct, validated, `raw_payload` always persisted regardless of validation outcome
 - [X] Migration: make `account`, `post_type`, `source_url`, `posted_at` nullable on `posts` — lets a structurally-invalid post still persist as a `rejected` row instead of being dropped, for resilience against upstream (Apify/Instagram) structural changes
-- [ ] Image resize (`ruby-vips`, 1080px max width) folded into the same ingestion pass, before the source URL expires
+- [ ] Media processing (folded into the same ingestion pass, right after the `Post` row is persisted):
+  - [ ] Migration: new `images` table (`post_id` FK, `position`, `b2_key`, `content_type`, `width`, `height`, `byte_size`, nullable `dhash`), unique index on `[post_id, position]`
+  - [ ] For each post's image(s) — `raw_payload["displayUrl"]` (`Image`) or each `raw_payload["childPosts"][i]["displayUrl"]` (`Sidecar`) — fetch, resize to 1080px max width, re-encode as WebP via `ruby-vips`
+  - [ ] Upload each via `ObjectStore#put`, passing `content_type: "image/webp"` explicitly
+  - [ ] Wrap all of one post's image writes in a single transaction: all `images` rows or none
+  - [ ] On success: `images` rows persisted, post stays/becomes `pending`. On failure: post becomes/stays `failed`, `raw_payload` still refreshed to the latest scrape
+  - [ ] On re-encountering an existing `shortcode`: skip if `done`/`needs_review`/`rejected`; retry media processing if `failed`
 - [ ] Containerize the app: Docker + Compose, `app` (Rails/Puma) + `db` (Postgres) services, isolated from ProPro's containers/DB
 - [ ] Health monitoring skeleton (see Section 5) — don't defer this to "later." Delivery: healthchecks.io ping per successful run, native Telegram integration for missed-ping alerts
 
 **Phase 2 — Dedup**
-- [ ] Implement dHash in Ruby (grayscale + resize via `ruby-vips`, bit comparison, Hamming distance)
+- [ ] Implement dHash in Ruby (grayscale + resize via `ruby-vips`, bit comparison, Hamming distance), populate the `images.dhash` column added above
 - [ ] Validate against a handful of known repost pairs before trusting it
 - [ ] Same-account rolling-window comparison (14–21 days)
 - [ ] Caption-similarity fallback via `gemini-embedding-001` + cosine similarity (only runs if dHash finds no match)
@@ -58,7 +67,7 @@ Media storage stays unaffected by any of this — B2 is already off-box, so ther
 
 **Phase 4 — Orchestration & resilience**
 - [ ] Cron via the `whenever` gem, staggered across the 41 accounts (not all triggered at once — avoids hammering Instagram/Apify simultaneously), every 2 days — writes a host crontab entry invoking `docker compose exec app bin/rails clubsync:ingest`
-- [ ] Status tracking — five states: `pending` (mapped, awaiting extraction) / `done` (extraction confirmed) / `needs_review` (extraction ran, confidence below bar) / `rejected` (adapter-level structural invalidity) / `failed` (transient downstream error, retryable). Retry with backoff on `failed`, no retry on `rejected`
+- [ ] Status tracking — five states: `pending` (mapped, awaiting extraction) / `done` (extraction confirmed) / `needs_review` (extraction ran, confidence below bar) / `rejected` (adapter-level structural invalidity) / `failed` (transient downstream error, retryable — see Media processing atomicity & retry above for the media-fetch case specifically). Retry with backoff on `failed`, no retry on `rejected`
 - [ ] Circuit breaker per source
 
 **Phase 5 — Public site & Admin/review surface**

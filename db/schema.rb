@@ -10,9 +10,24 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2026_09_13_150000) do
+ActiveRecord::Schema[8.0].define(version: 2026_09_14_000000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
+
+  create_table "images", force: :cascade do |t|
+    t.bigint "post_id", null: false
+    t.integer "position", null: false
+    t.string "b2_key", null: false
+    t.string "content_type", null: false
+    t.integer "width"
+    t.integer "height"
+    t.integer "byte_size"
+    t.string "dhash"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["post_id", "position"], name: "index_images_on_post_id_and_position", unique: true
+    t.index ["post_id"], name: "index_images_on_post_id"
+  end
 
   create_table "posts", force: :cascade do |t|
     t.string "shortcode", null: false
@@ -29,4 +44,6 @@ ActiveRecord::Schema[8.0].define(version: 2026_09_13_150000) do
     t.index ["shortcode"], name: "index_posts_on_shortcode", unique: true
     t.index ["status"], name: "index_posts_on_status"
   end
+
+  add_foreign_key "images", "posts"
 end
