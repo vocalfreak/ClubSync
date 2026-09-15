@@ -25,7 +25,6 @@ class MediaProcessor
   MAX_WIDTH = 1080
   CONTENT_TYPE = "image/webp".freeze
   REDIRECT_LIMIT = 3
-  SKIP_STATUSES = %w[done needs_review rejected].freeze
 
   def self.call(post, **kwargs)
     new(post, **kwargs).call
@@ -49,8 +48,10 @@ class MediaProcessor
       image_urls.each_with_index do |url, position|
         process_and_persist_image(url, position)
       end
-      @post.status = :pending
       @post.raw_payload = @raw_payload
+      @post.stage = :media_processed
+      @post.last_error = nil
+      @post.stage_failed_at = nil
       @post.save!
     end
 
@@ -63,7 +64,7 @@ class MediaProcessor
   private
 
   def skipped?
-    SKIP_STATUSES.include?(@post.status)
+    !@post.scraped?
   end
 
   def build_image_urls
@@ -103,7 +104,7 @@ class MediaProcessor
 
   def fail!(error)
     @post.images.reset
-    @post.update(status: :failed, raw_payload: @raw_payload)
+    @post.update(last_error: error.message, stage_failed_at: Time.current, raw_payload: @raw_payload)
     Result.new(status: :failed, error: error)
   rescue StandardError
     Result.new(status: :failed, error: error)

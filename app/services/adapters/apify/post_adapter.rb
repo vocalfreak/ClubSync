@@ -3,7 +3,7 @@ module Adapters
     # Maps one raw post hash from Apify's Instagram Post Scraper into a
     # canonical Post-shaped attribute hash. Pure mapping + shape validation;
     # never touches the database and never raises on malformed input.
-    # Never decides Post#status — that's PostLoader's job.
+    # Never decides Post#stage/is_event, that's PostLoader's job.
     class PostAdapter
       class Result
         attr_reader :attributes, :errors

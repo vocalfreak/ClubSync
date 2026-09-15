@@ -39,3 +39,6 @@
 /config/master.key
 
 /config/credentials/production.key
+
+# ignore opencode config
+.opencode

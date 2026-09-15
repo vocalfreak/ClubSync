@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2026_09_14_000000) do
+ActiveRecord::Schema[8.0].define(version: 2026_09_15_000000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -37,12 +37,15 @@ ActiveRecord::Schema[8.0].define(version: 2026_09_14_000000) do
     t.string "source_url"
     t.datetime "posted_at"
     t.jsonb "raw_payload", null: false
-    t.integer "status", default: 0, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.integer "stage", default: 0, null: false
+    t.boolean "is_event"
+    t.text "last_error"
+    t.datetime "stage_failed_at"
     t.index ["account"], name: "index_posts_on_account"
     t.index ["shortcode"], name: "index_posts_on_shortcode", unique: true
-    t.index ["status"], name: "index_posts_on_status"
+    t.index ["stage"], name: "index_posts_on_stage"
   end
 
   add_foreign_key "images", "posts"

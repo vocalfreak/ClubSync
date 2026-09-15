@@ -45,7 +45,7 @@ class MediaProcessorTest < ActiveSupport::TestCase
     @image_bytes = File.binread(Rails.root.join("test.jpg"))
   end
 
-  def build_post(raw_payload, status: :pending, **overrides)
+  def build_post(raw_payload, stage: :scraped, **overrides)
     Post.create!(
       shortcode: raw_payload["shortCode"],
       account: raw_payload["ownerUsername"],
@@ -54,7 +54,7 @@ class MediaProcessorTest < ActiveSupport::TestCase
       source_url: raw_payload["url"],
       posted_at: Time.iso8601(raw_payload["timestamp"]),
       raw_payload: raw_payload,
-      status: status,
+      stage: stage,
       **overrides
     )
   end
@@ -75,6 +75,7 @@ class MediaProcessorTest < ActiveSupport::TestCase
     result = process(post, object_store: object_store)
 
     assert result.success?
+    assert post.media_processed?, "stage should advance to media_processed on success"
     assert_equal 1, post.images.count
 
     image = post.images.first
@@ -117,7 +118,7 @@ class MediaProcessorTest < ActiveSupport::TestCase
   end
 
   test "rolls back every images row and marks the post failed when any image fails" do
-    post = build_post(SAMPLE_SIDECAR_POST, status: :failed)
+    post = build_post(SAMPLE_SIDECAR_POST)
     fresh_payload = SAMPLE_SIDECAR_POST.merge(
       "childPosts" => SAMPLE_SIDECAR_POST["childPosts"].map.with_index do |child, i|
         child.merge("displayUrl" => "https://scontent.cdninstagram.com/v/t51.2885-15/461234567_#{i}_fresh.jpg")
@@ -136,15 +137,17 @@ class MediaProcessorTest < ActiveSupport::TestCase
     assert result.failed?
     refute_nil result.error
     assert_equal 0, post.images.count
-    assert_equal "failed", post.status
+    assert post.scraped?, "stage should stay put on failure"
+    refute_nil post.last_error
+    refute_nil post.stage_failed_at
     assert_equal fresh_payload, post.raw_payload
   end
 
-  test "re-running against a failed post with a fresh payload succeeds and flips status to pending" do
+  test "re-running against a failed post with a fresh payload succeeds and flip stage to media_processed, clearing error state" do
     stale_payload = SAMPLE_IMAGE_POST.merge(
       "displayUrl" => "https://scontent.cdninstagram.com/v/t51.2885-15/expired_url.jpg"
     )
-    post = build_post(stale_payload, status: :failed)
+    post = build_post(stale_payload, last_error: "connection reset", stage_failed_at: 1.hour.ago)
     fresh_payload = SAMPLE_IMAGE_POST.merge(
       "displayUrl" => "https://scontent.cdninstagram.com/v/t51.2885-15/463591234_fresh.jpg"
     )
@@ -152,7 +155,9 @@ class MediaProcessorTest < ActiveSupport::TestCase
     result = process(post, raw_payload: fresh_payload)
 
     assert result.success?
-    assert_equal "pending", post.status
+    assert post.media_processed?, "stage should advance to media_processed on success"
+    assert_nil post.last_error
+    assert_nil post.stage_failed_at
     assert_equal fresh_payload, post.raw_payload
     assert_equal 1, post.images.count
     assert_equal "b2-key-1", post.images.first.b2_key
@@ -170,10 +175,10 @@ class MediaProcessorTest < ActiveSupport::TestCase
     assert_equal 648, image.height
   end
 
-  [ "done", "needs_review", "rejected" ].each do |status|
-    test "is a no-op for a #{status} post: no fetch, no upload, no db write" do
+  [ "media_processed", "deduped", "extracted" ].each do |stage|
+    test "is a no-op for a #{stage} post: no fetch, no upload, no db write" do
       original_payload = SAMPLE_IMAGE_POST
-      post = build_post(original_payload, status: status)
+      post = build_post(original_payload, stage: stage)
       fresh_payload = SAMPLE_IMAGE_POST.merge(
         "displayUrl" => "https://scontent.cdninstagram.com/v/t51.2885-15/463591234_fresh.jpg"
       )
@@ -189,7 +194,7 @@ class MediaProcessorTest < ActiveSupport::TestCase
       assert_equal 0, fetched
       assert_equal 0, object_store.calls.length
       assert_equal 0, post.images.count
-      assert_equal status, post.status
+      assert_equal stage, post.stage
       assert_equal original_payload, post.raw_payload
     end
   end
