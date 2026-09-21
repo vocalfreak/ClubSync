@@ -31,6 +31,8 @@ class AccountPipelineTest < ActiveSupport::TestCase
         post = Post.first
         assert_equal raw_post["shortCode"], post.shortcode
         assert post.scraped?, "MediaProcessor is stubbed as skipped, so stage stays scraped"
+        assert_equal({}, result.stage_results, "skipped media outcomes are not tallied")
+        assert_equal 0, result.unexpected_errors
       end
     end
   end
@@ -113,7 +115,157 @@ class AccountPipelineTest < ActiveSupport::TestCase
     end
   end
 
+  test "regression: a stalled media_processed post skips media and is extracted" do
+    existing = create(:post, :media_processed)
+    raw_post = build(:apify_image_post, short_code: existing.shortcode)
+    media_calls = []
+    extract_calls = []
+
+    stub_apify_client([ raw_post ]) do
+      stub_media_processor(media_calls) do
+        stub_extractor_with(->(_post) { Extractor::Result.new(status: :success) }, extract_calls) do
+          result = AccountPipeline.call(@account)
+
+          assert result.success?
+          assert_empty media_calls, "media must not re-run for an already-media_processed post"
+          assert_equal [ existing ], extract_calls.map(&:first), "the stalled post is handed to the extractor"
+          assert_equal({ "extracted" => { "succeeded" => 1 } }, result.stage_results)
+        end
+      end
+    end
+  end
+
+  test "records a whole-service extraction failure onto the breaker" do
+    existing = create(:post, :media_processed)
+    raw_post = build(:apify_image_post, short_code: existing.shortcode)
+    breaker = GeminiBreaker.new
+
+    stub_apify_client([ raw_post ]) do
+      stub_media_processor do
+        stub_extractor_with(->(_post) { Extractor::Result.new(status: :failed, error_kind: :whole_service, error: "quota") }) do
+          result = AccountPipeline.call(@account, breaker: breaker)
+
+          assert result.success?
+          assert_equal 1, breaker.consecutive_failures
+          refute breaker.open?
+          assert_equal({ "extracted" => { "failed" => 1 } }, result.stage_results)
+        end
+      end
+    end
+  end
+
+  test "opens the breaker at 5: the 5th whole-service failure skips extraction for the rest of the run" do
+    posts = Array.new(6) { build(:apify_image_post) }
+    breaker = GeminiBreaker.new
+    extract_calls = []
+
+    stub_apify_client(posts) do
+      stub_media_processor_with(->(post) { post.media_processed!; MediaProcessor::Result.new(status: :success) }) do
+        stub_extractor_with(->(_post) { Extractor::Result.new(status: :failed, error_kind: :whole_service, error: "quota") }, extract_calls) do
+          result = AccountPipeline.call(@account, breaker: breaker)
+
+          assert result.success?
+          assert breaker.open?, "five consecutive whole-service failures open the breaker"
+          assert_equal 5, extract_calls.length, "the 6th post's extraction is skipped while open"
+          assert_equal(
+            { "media_processed" => { "succeeded" => 6 }, "extracted" => { "failed" => 5 } },
+            result.stage_results
+          )
+          refute_includes extract_calls.map(&:first), Post.find_by(shortcode: posts.last["shortCode"]),
+            "the post behind the open breaker is never handed to the extractor"
+        end
+      end
+    end
+  end
+
+  test "skips extraction entirely while the breaker is already open" do
+    existing = create(:post, :media_processed)
+    raw_post = build(:apify_image_post, short_code: existing.shortcode)
+    breaker = GeminiBreaker.new
+    5.times { breaker.record(Extractor::Result.new(status: :failed, error_kind: :whole_service, error: "boom")) }
+    assert breaker.open?
+    extract_calls = []
+
+    stub_apify_client([ raw_post ]) do
+      stub_media_processor do
+        stub_extractor_with(->(_post) { raise "extractor must not run while open" }, extract_calls) do
+          result = AccountPipeline.call(@account, breaker: breaker)
+
+          assert result.success?
+          assert_empty extract_calls
+          assert existing.reload.media_processed?, "posts wait at media_processed while the breaker is open"
+          assert_equal({}, result.stage_results)
+        end
+      end
+    end
+  end
+
+  test "an unexpected error on one post does not stop the others and is recorded on the post" do
+    posts = Array.new(2) { build(:apify_image_post) }
+    media_calls = []
+    raise_on_first = true
+
+    original = MediaProcessor.method(:call)
+    MediaProcessor.define_singleton_method(:call) do |*args|
+      media_calls << args
+      if raise_on_first
+        raise_on_first = false
+        raise NoMethodError, "boom on the first post"
+      end
+      MediaProcessor::Result.new(status: :success)
+    end
+
+    begin
+      result = nil
+      stub_apify_client(posts) do
+        result = AccountPipeline.call(@account)
+      end
+    ensure
+      MediaProcessor.define_singleton_method(:call, original)
+    end
+
+    assert result.success?, "one bad post must not fail the whole account"
+    assert_equal 2, media_calls.length
+    assert_equal 1, result.unexpected_errors
+    assert_equal({ "media_processed" => { "succeeded" => 1 } }, result.stage_results)
+
+    failed_post = media_calls.first.first.reload
+    assert_match(/^Unexpected NoMethodError: boom on the first post/, failed_post.last_error)
+    refute_nil failed_post.stage_failed_at
+    assert failed_post.scraped?, "the raised post never advanced its stage"
+  end
+
+  test "tallies media succeeded and failed outcomes into stage_results" do
+    posts = Array.new(2) { build(:apify_image_post) }
+
+    stub_apify_client(posts) do
+      stub_media_processor_with(->(_post) { MediaProcessor::Result.new(status: :success) }) do
+        result = AccountPipeline.call(@account)
+        assert_equal({ "media_processed" => { "succeeded" => 2 } }, result.stage_results)
+        assert_equal 0, result.unexpected_errors
+      end
+    end
+
+    stub_apify_client(posts) do
+      stub_media_processor_with(->(_post) { MediaProcessor::Result.new(status: :failed, error: "nope") }) do
+        result = AccountPipeline.call(@account)
+        assert_equal({ "media_processed" => { "failed" => 2 } }, result.stage_results)
+      end
+    end
+  end
+
   private
+
+  def stub_media_processor_with(result_builder, calls = [])
+    original = MediaProcessor.method(:call)
+    MediaProcessor.define_singleton_method(:call) do |*args|
+      calls << args
+      result_builder.call(args.first)
+    end
+    yield calls
+  ensure
+    MediaProcessor.define_singleton_method(:call, original)
+  end
 
   def stub_media_processor(calls = [])
     original = MediaProcessor.method(:call)
@@ -124,6 +276,17 @@ class AccountPipelineTest < ActiveSupport::TestCase
     yield calls
   ensure
     MediaProcessor.define_singleton_method(:call, original)
+  end
+
+  def stub_extractor_with(result_builder, calls = [])
+    original = Extractor.method(:call)
+    Extractor.define_singleton_method(:call) do |post, **kwargs|
+      calls << [ post, kwargs ]
+      result_builder.call(post)
+    end
+    yield calls
+  ensure
+    Extractor.define_singleton_method(:call, original)
   end
 
   def stub_apify_client_error(error_class, message)

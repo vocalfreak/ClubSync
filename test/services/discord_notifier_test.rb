@@ -3,10 +3,12 @@ require "test_helper"
 class DiscordNotifierTest < ActiveSupport::TestCase
   def setup
     ENV["DISCORD_LOG_WEBHOOK_URL"] = "https://discord.com/api/webhooks/test-id/test-token"
+    ENV["DISCORD_ALERTS_WEBHOOK_URL"] = ""
   end
 
   def teardown
     ENV.delete("DISCORD_LOG_WEBHOOK_URL")
+    ENV.delete("DISCORD_ALERTS_WEBHOOK_URL")
   end
 
   def stub_net_http
@@ -38,11 +40,12 @@ class DiscordNotifierTest < ActiveSupport::TestCase
     assert_includes payload["content"], "15"
   end
 
-  test "includes failed accounts and stage breakdown in the message" do
+  test "includes failed accounts, stage results and unexpected errors in the message" do
     run = create(:ingestion_run, :finished,
                  accounts_failed: 1,
                  failed_accounts: [ { "account" => "baddie", "reason" => "Apify timeout" } ],
-                 stage_failure_counts: { "scraped" => 2 })
+                 stage_results: { "media_processed" => { "succeeded" => 8, "failed" => 1 }, "extracted" => { "succeeded" => 9 } },
+                 unexpected_errors: 2)
 
     result = stub_net_http { DiscordNotifier.post_run_summary(run) }
 
@@ -50,7 +53,9 @@ class DiscordNotifierTest < ActiveSupport::TestCase
     assert_includes payload["content"], "1 failed"
     assert_includes payload["content"], "baddie"
     assert_includes payload["content"], "Apify timeout"
-    assert_includes payload["content"], "scraped"
+    assert_includes payload["content"], "Media processed: 8 succeeded, 1 failed"
+    assert_includes payload["content"], "Extracted: 9 succeeded"
+    assert_includes payload["content"], "Unexpected errors: 2"
   end
 
   test "does nothing when DISCORD_LOG_WEBHOOK_URL is blank" do
@@ -76,6 +81,33 @@ class DiscordNotifierTest < ActiveSupport::TestCase
     assert_nothing_raised do
       DiscordNotifier.post_run_summary(run)
     end
+  ensure
+    Net::HTTP.define_method(:request, original_request)
+  end
+
+  test "post_breaker_open posts a one-shot alert to the alerts webhook" do
+    ENV["DISCORD_ALERTS_WEBHOOK_URL"] = "https://discord.com/api/webhooks/alerts-id/alerts-token"
+
+    result = stub_net_http { DiscordNotifier.post_breaker_open }
+
+    assert_equal "https://discord.com/api/webhooks/alerts-id/alerts-token", result[:uri]
+    payload = JSON.parse(result[:body])
+    assert_includes payload["content"], "Gemini extraction breaker opened"
+  end
+
+  test "post_breaker_open does nothing when the alerts webhook is blank" do
+    ENV["DISCORD_ALERTS_WEBHOOK_URL"] = ""
+
+    assert_nothing_raised { DiscordNotifier.post_breaker_open }
+  end
+
+  test "post_breaker_open swallows network errors without raising" do
+    ENV["DISCORD_ALERTS_WEBHOOK_URL"] = "https://discord.com/api/webhooks/alerts-id/alerts-token"
+
+    original_request = Net::HTTP.instance_method(:request)
+    Net::HTTP.define_method(:request) { |_request| raise "connection refused" }
+
+    assert_nothing_raised { DiscordNotifier.post_breaker_open }
   ensure
     Net::HTTP.define_method(:request, original_request)
   end

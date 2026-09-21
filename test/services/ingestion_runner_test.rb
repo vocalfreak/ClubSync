@@ -16,10 +16,13 @@ class IngestionRunnerTest < ActiveSupport::TestCase
     ENV.delete("HEALTHCHECKS_PING_URL")
   end
 
-  def stub_account_pipeline(success: true, posts_scraped: 1, errors: [])
+  def stub_account_pipeline(success: true, posts_scraped: 1, errors: [], stage_results: {}, unexpected_errors: 0)
     original = AccountPipeline.method(:call)
     AccountPipeline.define_singleton_method(:call) do |_account, **_kw|
-      AccountPipeline::Result.new(success: success, errors: errors, posts_scraped: posts_scraped)
+      AccountPipeline::Result.new(
+        success: success, errors: errors, posts_scraped: posts_scraped,
+        stage_results: stage_results, unexpected_errors: unexpected_errors
+      )
     end
     yield
   ensure
@@ -82,9 +85,9 @@ class IngestionRunnerTest < ActiveSupport::TestCase
     AccountPipeline.define_singleton_method(:call) do |account, **_kw|
       call_count += 1
       if account.handle == "good_account"
-        AccountPipeline::Result.new(success: true, errors: [], posts_scraped: 3)
+        AccountPipeline::Result.new(success: true, errors: [], posts_scraped: 3, stage_results: {}, unexpected_errors: 0)
       else
-        AccountPipeline::Result.new(success: false, errors: [ "rate limited" ], posts_scraped: 0)
+        AccountPipeline::Result.new(success: false, errors: [ "rate limited" ], posts_scraped: 0, stage_results: {}, unexpected_errors: 0)
       end
     end
 
@@ -100,22 +103,85 @@ class IngestionRunnerTest < ActiveSupport::TestCase
     AccountPipeline.define_singleton_method(:call, original)
   end
 
-  test "set stage_failure_counts from posts belonging to the run" do
+  test "sums stage_results and unexpected_errors across accounts onto the run" do
     create(:account, handle: "account1")
+    create(:account, handle: "account2")
 
     original = AccountPipeline.method(:call)
-    AccountPipeline.define_singleton_method(:call) do |_account, ingestion_run_id: nil|
-      Post.create!(shortcode: "ABC123", post_type: "Image", raw_payload: {}, stage: :scraped, last_ingestion_run_id: ingestion_run_id)
-      Post.create!(shortcode: "DEF456", post_type: "Image", raw_payload: {}, stage: :media_processed, last_ingestion_run_id: ingestion_run_id)
-      AccountPipeline::Result.new(success: true, errors: [], posts_scraped: 2)
+    AccountPipeline.define_singleton_method(:call) do |account, **_kw|
+      if account.handle == "account1"
+        AccountPipeline::Result.new(
+          success: true, errors: [], posts_scraped: 3,
+          stage_results: { "media_processed" => { "succeeded" => 2, "failed" => 1 } },
+          unexpected_errors: 1
+        )
+      else
+        AccountPipeline::Result.new(
+          success: true, errors: [], posts_scraped: 1,
+          stage_results: { "media_processed" => { "succeeded" => 1 }, "extracted" => { "failed" => 1 } },
+          unexpected_errors: 2
+        )
+      end
     end
 
     IngestionRunner.call
 
     run = IngestionRun.last
-    assert_equal({ "media_processed" => 1, "scraped" => 1 }, run.stage_failure_counts)
+    assert_equal(
+      { "media_processed" => { "succeeded" => 3, "failed" => 1 }, "extracted" => { "failed" => 1 } },
+      run.stage_results
+    )
+    assert_equal 3, run.unexpected_errors
   ensure
     AccountPipeline.define_singleton_method(:call, original)
+  end
+
+  test "creates one GeminiBreaker and passes it to every AccountPipeline call" do
+    create(:account, handle: "account1")
+    create(:account, handle: "account2")
+
+    breakers_seen = []
+    original = AccountPipeline.method(:call)
+    AccountPipeline.define_singleton_method(:call) do |_account, **_kw|
+      breakers_seen << _kw[:breaker]
+      AccountPipeline::Result.new(success: true, errors: [], posts_scraped: 1, stage_results: {}, unexpected_errors: 0)
+    end
+
+    IngestionRunner.call
+
+    assert_equal 2, breakers_seen.size
+    assert_kind_of GeminiBreaker, breakers_seen.first
+    assert_equal 1, breakers_seen.uniq.size, "one breaker instance per run"
+  ensure
+    AccountPipeline.define_singleton_method(:call, original)
+  end
+
+  test "posts the breaker-open alert only when the run ends with the breaker open" do
+    create(:account, handle: "account1")
+    create(:account, handle: "account2")
+
+    alert_called = false
+    original_alert = DiscordNotifier.method(:post_breaker_open)
+    DiscordNotifier.define_singleton_method(:post_breaker_open) { alert_called = true }
+
+    calls = 0
+    original = AccountPipeline.method(:call)
+    AccountPipeline.define_singleton_method(:call) do |_account, **_kw|
+      calls += 1
+      breaker = _kw[:breaker]
+      failures = calls <= 2 ? 1 : 5
+      failures.times { breaker.record(Extractor::Result.new(status: :failed, error_kind: :whole_service, error: "quota")) }
+      AccountPipeline::Result.new(success: true, errors: [], posts_scraped: 1, stage_results: {}, unexpected_errors: 0)
+    end
+
+    IngestionRunner.call
+    refute alert_called, "2 consecutive failures across the first run do not open the breaker"
+
+    IngestionRunner.call
+    assert alert_called, "an open breaker at run end posts the one-shot alert"
+  ensure
+    AccountPipeline.define_singleton_method(:call, original)
+    DiscordNotifier.define_singleton_method(:post_breaker_open, original_alert)
   end
 
   test "crashes when AccountPipeline raises an unanticipated exception" do

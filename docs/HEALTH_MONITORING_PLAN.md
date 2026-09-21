@@ -2,7 +2,7 @@
 
 *Scope: monitoring for `clubsync:ingest` only. Public-site uptime monitoring (Phase 5, once Cloudflare Tunnel is live) is explicitly out of scope for this doc — noted at the end as forward-looking.*
 
-*Companion doc: `docs/DATA_INGESTION_PLAN.md` specifies `AccountPipeline` (per-account work) and `IngestionRunner` (run-level orchestration — loops accounts, tallies results, calls the notifiers below). This doc owns `IngestionRun`, `DiscordNotifier`, and `HealthPing`; that doc owns everything `IngestionRunner` calls into to actually do the scraping.*
+*Companion doc: `docs/DATA_INGESTION_IMPLEMENTATION_PLAN.md` specifies `AccountPipeline` (per-account work) and `IngestionRunner` (run-level orchestration — loops accounts, tallies results, calls the notifiers below). This doc owns `IngestionRun`, `DiscordNotifier`, and `HealthPing`; that doc owns everything `IngestionRunner` calls into to actually do the scraping.*
 
 **Status · September 16, 2026:** Fully implemented and verified live. The 2-account dry run confirmed both delivery tracks: Discord summary posted to `#clubsync-log` and healthchecks.io pinged (finished). All checklist items below are done; only the healthchecks.io/Discord pieces are already in place (check `clubsync-ingest`, period 2d, grace 1h, Discord integration with `#clubsync-alerts`, webhooks in `.env`/`env.example`).
 
@@ -58,7 +58,7 @@ Notes:
 add_reference :posts, :last_ingestion_run, foreign_key: { to_table: :ingestion_runs }, null: true
 ```
 
-Set by `PostLoader` every time it creates or refreshes a row (i.e. the same two branches that already touch the DB — `shortcode not found → create` and `shortcode found, stage != extracted → refresh`), called from `AccountPipeline` with the `ingestion_run_id` it was given (see `docs/DATA_INGESTION_PLAN.md` §2). The `skip` and `no_row` branches don't touch it, consistent with `PostLoader` already leaving untouched rows alone.
+Set by `PostLoader` every time it creates or refreshes a row (i.e. the same two branches that already touch the DB — `shortcode not found → create` and `shortcode found, stage != extracted → refresh`), called from `AccountPipeline` with the `ingestion_run_id` it was given (see `docs/DATA_INGESTION_IMPLEMENTATION_PLAN.md` §2). The `skip` and `no_row` branches don't touch it, consistent with `PostLoader` already leaving untouched rows alone.
 
 This is what makes `stage_failure_counts` computable without inferring membership from timestamps:
 
@@ -70,7 +70,7 @@ Post.where(last_ingestion_run_id: run.id).group(:stage).count
 
 ## 3. `IngestionRunner` shape
 
-Full object spec (looping, tallying, `AccountPipeline` interface) lives in `docs/DATA_INGESTION_PLAN.md` §3 — reproduced here only for the pieces this doc's guarantees depend on:
+Full object spec (looping, tallying, `AccountPipeline` interface) lives in `docs/DATA_INGESTION_IMPLEMENTATION_PLAN.md` §3 — reproduced here only for the pieces this doc's guarantees depend on:
 
 ```ruby
 def self.call
@@ -80,7 +80,7 @@ def self.call
   begin
     Account.all.each do |account|
       result = AccountPipeline.call(account, ingestion_run_id: run.id)
-      # tally result into run — see docs/DATA_INGESTION_PLAN.md §3
+      # tally result into run — see docs/DATA_INGESTION_IMPLEMENTATION_PLAN.md §3
     end
 
     run.stage_failure_counts = Post.where(last_ingestion_run_id: run.id).group(:stage).count
@@ -183,7 +183,7 @@ HEALTHCHECKS_PING_URL=https://hc-ping.com/<check-uuid>
 
 ## 7. Phase 1 checklist (replaces the existing "Health monitoring skeleton" bullet)
 
-> **Prerequisite:** `AccountPipeline` and `IngestionRunner` (`docs/DATA_INGESTION_PLAN.md`) must exist first — this doc's guarantees (one summary per run, hermetic notifiers) are properties of `IngestionRunner`'s `ensure` block, which doesn't exist until that doc's Phase 4 checklist is built.
+> **Prerequisite:** `AccountPipeline` and `IngestionRunner` (`docs/DATA_INGESTION_IMPLEMENTATION_PLAN.md`) must exist first — this doc's guarantees (one summary per run, hermetic notifiers) are properties of `IngestionRunner`'s `ensure` block, which doesn't exist until that doc's Phase 4 checklist is built.
 
 - [x] Migration: `ingestion_runs` table (integer enum for `status`, per §2.1)
 - [x] Migration: `posts.last_ingestion_run_id` (nullable FK)
@@ -191,13 +191,13 @@ HEALTHCHECKS_PING_URL=https://hc-ping.com/<check-uuid>
 - [x] `IngestionRun` model (integer-backed `status` enum: running/finished/crashed, mirroring `Post.stage`)
 - [x] `DiscordNotifier` service: `post_run_summary(run)`, posts to `DISCORD_LOG_WEBHOOK_URL` via `Net::HTTP`, hermetic (rescue + log, never raises)
 - [x] `HealthPing` service: `start` / `fail` / `finish` wrapping `HEALTHCHECKS_PING_URL` + suffix, hermetic (rescue + log, never raises, no-op if var blank)
-- [x] `IngestionRunner`'s outer `rescue`/`ensure` and notifier calls (object itself specified in `docs/DATA_INGESTION_PLAN.md` §3 — this checklist item is about the notifier wiring, not the looping/tallying logic)
+- [x] `IngestionRunner`'s outer `rescue`/`ensure` and notifier calls (object itself specified in `docs/DATA_INGESTION_IMPLEMENTATION_PLAN.md` §3 — this checklist item is about the notifier wiring, not the looping/tallying logic)
 - [x] Tests (Minitest, matching existing suite):
   - [x] `IngestionRun` model test (enum values, defaults)
   - [x] `PostLoader` test additions: `last_ingestion_run_id` set on create/refresh, not on skip/no_row
   - [x] `DiscordNotifier` test: correct URL/body posted; swallows a network error (stub `Net::HTTP` to raise)
   - [x] `HealthPing` test: correct suffix per call; swallows a network error; no-op when URL blank
-  - [x] `IngestionRunner` test: outer exception → `crashed` + `/fail`; `ensure` always saves and calls both notifiers even when one raises (per-account tallying tests live in `docs/DATA_INGESTION_PLAN.md` §6, not duplicated here)
+  - [x] `IngestionRunner` test: outer exception → `crashed` + `/fail`; `ensure` always saves and calls both notifiers even when one raises (per-account tallying tests live in `docs/DATA_INGESTION_IMPLEMENTATION_PLAN.md` §6, not duplicated here)
 - [x] healthchecks.io: create `clubsync-ingest` check, period 2d, grace 1h, Discord integration → `#clubsync-alerts`
 - [x] Discord: create server (if needed), create `#clubsync-log` and `#clubsync-alerts` channels
 - [x] Discord: create webhooks for both channels, add URLs to `.env` + `env.example`; add `HEALTHCHECKS_PING_URL` to `.env` + `env.example`

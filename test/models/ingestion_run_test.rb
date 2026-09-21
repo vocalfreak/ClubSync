@@ -27,6 +27,7 @@ class IngestionRunTest < ActiveSupport::TestCase
   test "jsonb columns default correctly" do
     run = IngestionRun.create!(started_at: Time.current)
     assert_equal [], run.failed_accounts
-    assert_equal({}, run.stage_failure_counts)
+    assert_equal({}, run.stage_results)
+    assert_equal 0, run.unexpected_errors
   end
 end

@@ -1,13 +1,13 @@
 class ObjectStore
-  def initialize
-    @client = Aws::S3::Client.new(
+  def initialize(client: nil, bucket: nil)
+    @client = client || Aws::S3::Client.new(
       access_key_id: ENV["B2_KEY_ID"],
       secret_access_key: ENV["B2_APPLICATION_KEY"],
       endpoint: ENV["B2_ENDPOINT"],
       region: ENV["B2_REGION"],
       force_path_style: true
     )
-    @bucket = ENV["B2_BUCKET"]
+    @bucket = bucket || ENV["B2_BUCKET"]
   end
 
   def put(bytes, content_type: "image/jpeg")
@@ -23,5 +23,9 @@ class ObjectStore
 
   def get_url(key)
     "#{ENV['B2_ENDPOINT']}/#{ENV['B2_BUCKET']}/#{key}"
+  end
+
+  def get(b2_key)
+    @client.get_object(bucket: @bucket, key: b2_key).body.read
   end
 end
