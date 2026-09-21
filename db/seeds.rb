@@ -1,9 +1,45 @@
-# This file should ensure the existence of records required to run the application in every environment (production,
-# development, test). The code here should be idempotent so that it can be executed at any point in every environment.
-# The data can then be loaded with the bin/rails db:seed command (or created alongside the database with db:setup).
-#
-# Example:
-#
-#   ["Action", "Comedy", "Drama", "Horror"].each do |genre_name|
-#     MovieGenre.find_or_create_by!(name: genre_name)
-#   end
+HANDLES = %w[
+  itsocietymmu
+  acsmmu
+  buddhistsociety.mmu
+  byic.mmu
+  official_clsc_mmu
+  commsocietymmu
+  cmcmmu
+  cac.mmu
+  mmu.dice
+  ebeevocals
+  engsoc_mmucyb
+  techgirls_mmu
+  gdg.mmu
+  iucyber
+  iss_mmucyber
+  jcsmmu
+  kcc_cyber
+  mmucscyber
+  fcammu
+  radiommu
+  gdcmmu
+  ieeemmusb
+  srcmmu_cyber
+  mmusuperheroes
+  rentakmmu
+  srmcyber
+  shsommu
+  sccmmu_cyber
+  tamucyb
+  mmu.akido_club
+  badmintonclubmmucyber
+  mmucyberjayachessclub
+  volbees_mmu
+  mmucyberjayarchery
+  mmusports
+  mmuswimmingclub
+  mmufccyber
+  mmuwatersports
+  netbeesmmu
+  oarsmmucyber
+  mmuhornbillsreds
+].freeze
+
+HANDLES.each { |handle| Account.find_or_create_by!(handle: handle) }

@@ -4,6 +4,8 @@
 
 *Companion doc: `docs/DATA_INGESTION_PLAN.md` specifies `AccountPipeline` (per-account work) and `IngestionRunner` (run-level orchestration — loops accounts, tallies results, calls the notifiers below). This doc owns `IngestionRun`, `DiscordNotifier`, and `HealthPing`; that doc owns everything `IngestionRunner` calls into to actually do the scraping.*
 
+**Status · September 16, 2026:** Fully implemented and verified live. The 2-account dry run confirmed both delivery tracks: Discord summary posted to `#clubsync-log` and healthchecks.io pinged (finished). All checklist items below are done; only the healthchecks.io/Discord pieces are already in place (check `clubsync-ingest`, period 2d, grace 1h, Discord integration with `#clubsync-alerts`, webhooks in `.env`/`env.example`).
+
 *Naming note: this doc uses `ingestion_runs`/`IngestionRun` throughout, matching the vocabulary the master plan already uses ("ingestion pass", "ingestion run"). If that still feels off once you're looking at the migration, `scrape_runs`/`ScrapeRun` is a clean drop-in rename — nothing below depends on the name itself, just rename consistently before running the migration.
 
 ---
@@ -183,20 +185,20 @@ HEALTHCHECKS_PING_URL=https://hc-ping.com/<check-uuid>
 
 > **Prerequisite:** `AccountPipeline` and `IngestionRunner` (`docs/DATA_INGESTION_PLAN.md`) must exist first — this doc's guarantees (one summary per run, hermetic notifiers) are properties of `IngestionRunner`'s `ensure` block, which doesn't exist until that doc's Phase 4 checklist is built.
 
-- [ ] Migration: `ingestion_runs` table (integer enum for `status`, per §2.1)
-- [ ] Migration: `posts.last_ingestion_run_id` (nullable FK)
-- [ ] `PostLoader`: set `last_ingestion_run_id` on create and refresh branches; leave unset on `skip` and `no_row`
-- [ ] `IngestionRun` model (integer-backed `status` enum: running/finished/crashed, mirroring `Post.stage`)
-- [ ] `DiscordNotifier` service: `post_run_summary(run)`, posts to `DISCORD_LOG_WEBHOOK_URL` via `Net::HTTP`, hermetic (rescue + log, never raises)
-- [ ] `HealthPing` service: `start` / `fail` / `finish` wrapping `HEALTHCHECKS_PING_URL` + suffix, hermetic (rescue + log, never raises, no-op if var blank)
-- [ ] `IngestionRunner`'s outer `rescue`/`ensure` and notifier calls (object itself specified in `docs/DATA_INGESTION_PLAN.md` §3 — this checklist item is about the notifier wiring, not the looping/tallying logic)
-- [ ] Tests (Minitest, matching existing suite):
-  - [ ] `IngestionRun` model test (enum values, defaults)
-  - [ ] `PostLoader` test additions: `last_ingestion_run_id` set on create/refresh, not on skip/no_row
-  - [ ] `DiscordNotifier` test: correct URL/body posted; swallows a network error (stub `Net::HTTP` to raise)
-  - [ ] `HealthPing` test: correct suffix per call; swallows a network error; no-op when URL blank
-  - [ ] `IngestionRunner` test: outer exception → `crashed` + `/fail`; `ensure` always saves and calls both notifiers even when one raises (per-account tallying tests live in `docs/DATA_INGESTION_PLAN.md` §6, not duplicated here)
-- [ ] healthchecks.io: create `clubsync-ingest` check, period 2d, grace 1h, Discord integration → `#clubsync-alerts`
-- [ ] Discord: create server (if needed), create `#clubsync-log` and `#clubsync-alerts` channels
-- [ ] Discord: create webhooks for both channels, add URLs to `.env` + `env.example`; add `HEALTHCHECKS_PING_URL` to `.env` + `env.example`
-- [ ] Dry run against a small account subset to sanity-check the summary format before trusting it on the full 41
+- [x] Migration: `ingestion_runs` table (integer enum for `status`, per §2.1)
+- [x] Migration: `posts.last_ingestion_run_id` (nullable FK)
+- [x] `PostLoader`: set `last_ingestion_run_id` on create and refresh branches; leave unset on `skip` and `no_row`
+- [x] `IngestionRun` model (integer-backed `status` enum: running/finished/crashed, mirroring `Post.stage`)
+- [x] `DiscordNotifier` service: `post_run_summary(run)`, posts to `DISCORD_LOG_WEBHOOK_URL` via `Net::HTTP`, hermetic (rescue + log, never raises)
+- [x] `HealthPing` service: `start` / `fail` / `finish` wrapping `HEALTHCHECKS_PING_URL` + suffix, hermetic (rescue + log, never raises, no-op if var blank)
+- [x] `IngestionRunner`'s outer `rescue`/`ensure` and notifier calls (object itself specified in `docs/DATA_INGESTION_PLAN.md` §3 — this checklist item is about the notifier wiring, not the looping/tallying logic)
+- [x] Tests (Minitest, matching existing suite):
+  - [x] `IngestionRun` model test (enum values, defaults)
+  - [x] `PostLoader` test additions: `last_ingestion_run_id` set on create/refresh, not on skip/no_row
+  - [x] `DiscordNotifier` test: correct URL/body posted; swallows a network error (stub `Net::HTTP` to raise)
+  - [x] `HealthPing` test: correct suffix per call; swallows a network error; no-op when URL blank
+  - [x] `IngestionRunner` test: outer exception → `crashed` + `/fail`; `ensure` always saves and calls both notifiers even when one raises (per-account tallying tests live in `docs/DATA_INGESTION_PLAN.md` §6, not duplicated here)
+- [x] healthchecks.io: create `clubsync-ingest` check, period 2d, grace 1h, Discord integration → `#clubsync-alerts`
+- [x] Discord: create server (if needed), create `#clubsync-log` and `#clubsync-alerts` channels
+- [x] Discord: create webhooks for both channels, add URLs to `.env` + `env.example`; add `HEALTHCHECKS_PING_URL` to `.env` + `env.example`
+- [x] Dry run against a small account subset to sanity-check the summary format before trusting it on the full 41 — done (2 accounts, status `finished`, summary + ping both confirmed working)

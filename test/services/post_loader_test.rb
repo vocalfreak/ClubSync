@@ -117,4 +117,59 @@ class PostLoaderTest < ActiveSupport::TestCase
   ensure
     Post.define_singleton_method(:create!, original)
   end
+
+  test "sets last_ingestion_run_id on create when provided" do
+    run = create(:ingestion_run)
+    apify_post = build(:apify_image_post)
+    result = Adapters::Apify::PostAdapter.new.parse_post(apify_post)
+
+    loader_result = PostLoader.call(result, ingestion_run_id: run.id)
+
+    assert_equal run.id, loader_result.post.last_ingestion_run_id
+  end
+
+  test "sets last_ingestion_run_id on refresh when provided" do
+    existing = create(:post, :media_processed, shortcode: "ABC12345678")
+    run = create(:ingestion_run)
+    apify_post = build(:apify_image_post, short_code: "ABC12345678")
+
+    result = Adapters::Apify::PostAdapter.new.parse_post(apify_post)
+    PostLoader.call(result, ingestion_run_id: run.id)
+
+    existing.reload
+    assert_equal run.id, existing.last_ingestion_run_id
+  end
+
+  test "does not set last_ingestion_run_id on skip" do
+    existing = create(:post, :extracted, shortcode: "ABC12345678", last_ingestion_run_id: nil)
+    run = create(:ingestion_run)
+    apify_post = build(:apify_image_post, short_code: "ABC12345678")
+
+    result = Adapters::Apify::PostAdapter.new.parse_post(apify_post)
+    PostLoader.call(result, ingestion_run_id: run.id)
+
+    existing.reload
+    assert_nil existing.last_ingestion_run_id
+  end
+
+  test "does not create a row on no_row so ingestion_run_id is irrelevant" do
+    apify_post = build(:apify_image_post, :missing_shortcode)
+    result = Adapters::Apify::PostAdapter.new.parse_post(apify_post)
+    run = create(:ingestion_run)
+
+    loader_result = PostLoader.call(result, ingestion_run_id: run.id)
+
+    assert loader_result.no_row?
+    assert_equal 0, Post.count
+  end
+
+  test "works without ingestion_run_id (backward compatible)" do
+    apify_post = build(:apify_image_post)
+    result = Adapters::Apify::PostAdapter.new.parse_post(apify_post)
+
+    loader_result = PostLoader.call(result)
+
+    assert loader_result.created?
+    assert_nil loader_result.post.last_ingestion_run_id
+  end
 end

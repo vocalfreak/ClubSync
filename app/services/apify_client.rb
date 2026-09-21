@@ -7,7 +7,7 @@ class ApifyClient
   class RateLimitedError < StandardError; end
 
   ENDPOINT = "https://api.apify.com/v2/actors/apify~instagram-post-scraper/run-sync-get-dataset-items".freeze
-  DEFAULT_RESULTS_LIMIT = 15
+  DEFAULT_RESULTS_LIMIT = 10
   OPEN_TIMEOUT = 60
   READ_TIMEOUT = 340
 

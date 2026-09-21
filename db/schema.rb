@@ -10,9 +10,16 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2026_09_15_000000) do
+ActiveRecord::Schema[8.0].define(version: 2026_09_16_000003) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
+
+  create_table "accounts", force: :cascade do |t|
+    t.string "handle", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["handle"], name: "index_accounts_on_handle", unique: true
+  end
 
   create_table "images", force: :cascade do |t|
     t.bigint "post_id", null: false
@@ -29,6 +36,20 @@ ActiveRecord::Schema[8.0].define(version: 2026_09_15_000000) do
     t.index ["post_id"], name: "index_images_on_post_id"
   end
 
+  create_table "ingestion_runs", force: :cascade do |t|
+    t.datetime "started_at", null: false
+    t.datetime "finished_at"
+    t.integer "status", default: 0, null: false
+    t.integer "accounts_processed", default: 0
+    t.integer "accounts_failed", default: 0
+    t.integer "posts_scraped", default: 0
+    t.jsonb "failed_accounts", default: []
+    t.jsonb "stage_failure_counts", default: {}
+    t.text "notes"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+  end
+
   create_table "posts", force: :cascade do |t|
     t.string "shortcode", null: false
     t.string "account"
@@ -43,10 +64,13 @@ ActiveRecord::Schema[8.0].define(version: 2026_09_15_000000) do
     t.boolean "is_event"
     t.text "last_error"
     t.datetime "stage_failed_at"
+    t.bigint "last_ingestion_run_id"
     t.index ["account"], name: "index_posts_on_account"
+    t.index ["last_ingestion_run_id"], name: "index_posts_on_last_ingestion_run_id"
     t.index ["shortcode"], name: "index_posts_on_shortcode", unique: true
     t.index ["stage"], name: "index_posts_on_stage"
   end
 
   add_foreign_key "images", "posts"
+  add_foreign_key "posts", "ingestion_runs", column: "last_ingestion_run_id"
 end

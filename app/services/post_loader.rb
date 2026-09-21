@@ -1,4 +1,4 @@
-# Update/Insers a Post row from adapter Result object 
+# Update/Insers a Post row from adapter Result object
 # Owns every write to `posts`
 # Never advances `stage` past `scraped`, and never
 # touches `is_event`/`last_error`/`stage_failed_at` — those belong to
@@ -26,17 +26,17 @@ class PostLoader
     end
   end
 
-  def self.call(adapter_result)
-    new.call(adapter_result)
+  def self.call(adapter_result, ingestion_run_id: nil)
+    new.call(adapter_result, ingestion_run_id: ingestion_run_id)
   end
 
-  def call(adapter_result)
+  def call(adapter_result, ingestion_run_id: nil)
     return Result.new(outcome: :no_row, adapter_result: adapter_result) if adapter_result.fatal?
 
     post = Post.find_by(shortcode: adapter_result.attributes[:shortcode])
 
     if post.nil?
-      post = Post.create!(adapter_result.attributes.merge(stage: :scraped))
+      post = Post.create!(adapter_result.attributes.merge(stage: :scraped, last_ingestion_run_id: ingestion_run_id))
       return Result.new(outcome: :created, adapter_result: adapter_result, post: post)
     end
 
@@ -45,7 +45,7 @@ class PostLoader
     # raw_payload always overwrites
     # Other Fields only gets overwritten when the new scrape json has a value
     refreshable = adapter_result.attributes.except(:raw_payload).compact
-    post.update!(refreshable.merge(raw_payload: adapter_result.attributes[:raw_payload]))
+    post.update!(refreshable.merge(raw_payload: adapter_result.attributes[:raw_payload], last_ingestion_run_id: ingestion_run_id))
     Result.new(outcome: :refreshed, adapter_result: adapter_result, post: post)
   end
 end

@@ -2,6 +2,8 @@
 
 *For the implementation agent. Primary scope is `PostLoader`, but this migration touches real, already-built code (`Post`, `MediaProcessor`, `PostAdapter`) and all of it ships together — see §2.*
 
+**Status · September 16, 2026:** Implemented and shipped alongside the Phase 4 orchestration work. Two later refinements not reflected in the code below: (1) the health-monitoring work added an optional `ingestion_run_id:` argument — `PostLoader.call` sets `last_ingestion_run_id` on the create and refresh branches, leaves it unset on `skip`/`no_row` (see `docs/HEALTH_MONITORING_PLAN.md`); (2) the `post_ingestor.rb` sketch in §0 is now concretely `AccountPipeline` (`app/services/account_pipeline.rb`). Everything else below matches the shipped implementation.
+
 ## 0. Where this sits in the pipeline
 
 ```

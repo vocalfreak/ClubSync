@@ -84,7 +84,7 @@ class ApifyClientTest < ActiveSupport::TestCase
     assert_equal "/v2/actors/apify~instagram-post-scraper/run-sync-get-dataset-items", http.last_request.path
     assert_equal "Bearer #{API_TOKEN}", http.last_request["Authorization"]
     assert_equal "application/json", http.last_request["Content-Type"]
-    assert_equal({ "username" => [ "stimpflipevents" ], "resultsLimit" => 15 }, JSON.parse(http.last_request.body))
+    assert_equal({ "username" => [ "stimpflipevents" ], "resultsLimit" => 10 }, JSON.parse(http.last_request.body))
   end
 
   test "honours a configured APIFY_RESULTS_LIMIT in the actor input" do
@@ -101,7 +101,7 @@ class ApifyClientTest < ActiveSupport::TestCase
 
     fetch("clubbanghaus", http: http)
 
-    assert_equal({ "username" => [ "clubbanghaus" ], "resultsLimit" => 15 }, JSON.parse(http.last_request.body))
+    assert_equal({ "username" => [ "clubbanghaus" ], "resultsLimit" => 10 }, JSON.parse(http.last_request.body))
   end
 
   test "raises TimeoutError on an open timeout" do

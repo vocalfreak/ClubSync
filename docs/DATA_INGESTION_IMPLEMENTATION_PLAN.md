@@ -2,6 +2,8 @@
 
 *Scope: the per-account and per-run orchestration that turns a list of Instagram accounts into `Post`/`Image` rows — `Account`, `AccountPipeline`, `IngestionRunner`, and the `clubsync:ingest` rake task. Run-level bookkeeping (`IngestionRun`) and reporting (Discord/healthchecks.io) are specified in `docs/HEALTH_MONITORING_PLAN.md`; this doc owns everything `IngestionRunner` calls *into*, that doc owns everything `IngestionRunner` calls *out to*.*
 
+**Status · September 16, 2026:** Fully implemented and tested. Live dry run over 2 real accounts (`itsocietymmu`, `mmusports`): status `finished`, 2/2 accounts, 0 failed, 20 posts (12 `media_processed`, 8 `scraped` — all `Video`, so untouched by design). One decision note: **`resultsLimit` is 10, not 15** (see §6 — user-confirmed default; update reflected throughout). Remaining only the deploy-time setup on the E5440.
+
 ---
 
 ## 1. Why two objects, not one
@@ -159,7 +161,7 @@ That's the whole task. Everything else is unit-testable Ruby objects.
 The client targets Apify's **Instagram Post Scraper** actor — `apify/instagram-post-scraper` (not the general-purpose `apify/instagram-scraper`, which has a different input schema). `AccountPipeline` calls into it for the per-account fetch step: one synchronous actor run per handle via
 
 ```json
-{"username": [account.handle], "resultsLimit": 15}
+{"username": [account.handle], "resultsLimit": 10}
 ```
 
 (`username` is the actor's array-typed input field — singular, not `usernames`) — returning that account's items directly, matching `AccountPipeline`'s per-account contract and keeping failure isolation intact: one account's timeout fails one account, not all 41. A single batched run across all handles was considered and rejected — it would collapse every account into one failure domain, defeating the narrow per-account rescue this whole design is built around. Cost is not a factor either way: Apify bills per result returned, not meaningfully per run, so 41 small runs vs. one large run barely affects usage against the free tier.
@@ -173,7 +175,7 @@ The client targets Apify's **Instagram Post Scraper** actor — `apify/instagram
 
 If the client doesn't already expose distinct exception classes for these failure modes (needed for the narrow rescue in §3), that's a small gap to close rather than a new integration: open/read timeout (or HTTP 408, the sync-ceiling cut-off) → `ApifyClient::TimeoutError`; HTTP 429 or a failed run → `ApifyClient::RateLimitedError`; anything else raises as an unanticipated bug (the narrow-rescue contract treats only anticipated failures as data).
 
-**Cost watch, not a blocker:** `resultsLimit: 15` is a resolved number — a safety ceiling above typical per-account posting volume, not a cost lever, since Apify bills per actual result returned rather than per limit set. You mainly need new posts since the last scrape, not full history re-fetched every 2 days. Worth a glance at Apify's usage dashboard after the first few real runs to confirm the free tier holds.
+**Cost watch, not a blocker:** `resultsLimit: 10` is a resolved number — a safety ceiling above typical per-account posting volume, not a cost lever, since Apify bills per actual result returned rather than per limit set. (The original draft said 15; 10 was confirmed as the working default in the September 2026 build/dry run.) You mainly need new posts since the last scrape, not full history re-fetched every 2 days. Worth a glance at Apify's usage dashboard after the first few real runs to confirm the free tier holds.
 
 ---
 
@@ -190,14 +192,14 @@ Matches existing conventions (Minitest, `factory_bot_rails` + `faker`, literals 
 
 ## 8. Phase 4 checklist (replaces "Build the `clubsync:ingest` rake task" bullet)
 
-- [ ] Migration: `accounts` table (`handle` string, unique index) — per §2
-- [ ] `Account` model
-- [ ] `db/seeds.rb`: the 41 handles, `find_or_create_by!`
-- [ ] `AccountPipeline` service (`app/services/account_pipeline.rb`) — fetch → `PostAdapter` → `PostLoader` → `MediaProcessor` chain per account, `Result` object (`success?`/`errors`/`posts_scraped`), narrow rescue on anticipated Apify exception classes only
-- [ ] `IngestionRunner` service (`app/services/ingestion_runner.rb`) — loops `Account.all`, tallies `Result`s into `IngestionRun`, outer `rescue`/`ensure`, calls `DiscordNotifier`/`HealthPing` (both specified in `docs/HEALTH_MONITORING_PLAN.md`)
-- [ ] Thin `clubsync:ingest` rake task — single call to `IngestionRunner.call`
-- [ ] Confirm/extend the existing Apify client: targets `apify/instagram-post-scraper` via `POST .../actors/apify~instagram-post-scraper/run-sync-get-dataset-items`, input `{"username": [handle], "resultsLimit": 15}`, token sent via `Authorization: Bearer` header; expose distinct exception classes for timeout/rate-limit/network failure
-- [ ] Tests per §7
-- [ ] Cron via `whenever` (unchanged from master plan Phase 4) — sequential per-account processing inside `AccountPipeline`'s loop is what provides staggering; no separate offset-schedule logic needed
-- [ ] Post state tracking (unchanged from master plan Phase 4) — `stage`/`is_event`/`last_error`/`stage_failed_at`, idempotent re-attempt on next scrape
+- [x] Migration: `accounts` table (`handle` string, unique index) — per §2
+- [x] `Account` model
+- [x] `db/seeds.rb`: the 41 handles, `find_or_create_by!`
+- [x] `AccountPipeline` service (`app/services/account_pipeline.rb`) — fetch → `PostAdapter` → `PostLoader` → `MediaProcessor` chain per account, `Result` object (`success?`/`errors`/`posts_scraped`), narrow rescue on anticipated Apify exception classes only
+- [x] `IngestionRunner` service (`app/services/ingestion_runner.rb`) — loops `Account.all`, tallies `Result`s into `IngestionRun`, outer `rescue`/`ensure`, calls `DiscordNotifier`/`HealthPing` (both specified in `docs/HEALTH_MONITORING_PLAN.md`)
+- [x] Thin `clubsync:ingest` rake task — single call to `IngestionRunner.call`
+- [x] Confirm/extend the existing Apify client: targets `apify/instagram-post-scraper` via `POST .../actors/apify~instagram-post-scraper/run-sync-get-dataset-items`, input `{"username": [handle], "resultsLimit": 10}`, token sent via `Authorization: Bearer` header; expose distinct exception classes for timeout/rate-limit/network failure
+- [x] Tests per §7
+- [x] Cron via `whenever` (unchanged from master plan Phase 4) — sequential per-account processing inside `AccountPipeline`'s loop is what provides staggering; no separate offset-schedule logic needed. `config/schedule.rb` written and rendering verified; host crontab install deferred to deploy
+- [x] Post state tracking (unchanged from master plan Phase 4) — `stage`/`is_event`/`last_error`/`stage_failed_at`, idempotent re-attempt on next scrape
 - [ ] Circuit breaker per source (unchanged, still open — will add its own columns to `accounts` when designed; not detailed in this doc)

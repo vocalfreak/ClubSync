@@ -1,5 +1,7 @@
 # ClubSync — Post Status Model: Decisions
 
+**Status · September 16, 2026:** All schema/decision content here is shipped — `posts.stage` (integer enum), `is_event`, `last_error`, `stage_failed_at` live in the app (migration `20260915000000`); `SCHEMA_POST_STATUS_REMODEL`'s "Loader routing logic" was later refined by `docs/POST_LODAER_IMPLEMENTATION_PLAN.md` (Loader no longer advances stage at all). The "Still open" item below (where per-field extraction confidence is stored) remains open — Phase 3 concern.
+
 Supersedes the old single `posts.status` enum (`pending`/`done`/`needs_review`/`rejected`/`failed`) and the retry logic tied to it.
 
 ## Schema changes (`posts` table)
