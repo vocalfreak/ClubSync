@@ -152,6 +152,48 @@ New: `posts.category` (nullable string), set alongside `is_event`. Category curr
 
 ## 5. Pipeline integration
 
+### 5.0 Pipeline flow (reference)
+
+The end-to-end flow, written for reference. Each step is specified in detail in its owning doc: steps 1–5 in `DATA_INGESTION_IMPLEMENTATION_PLAN.md` and `POST_LODAER_IMPLEMENTATION_PLAN.md`, step 6 here (§6–§8), step 7 in §13 / the dedup plan, step 8 in §8.
+
+1. **Cron triggers Apify's Instagram scrape every 48 hours** (`clubsync:ingest`), staggered across the 41 accounts.
+2. **Apify returns raw JSON** — one object per post, see the sample payload (`ExampleJsonResult`) for the field shape.
+3. **Adapter (service) parses the raw JSON fields and creates a `Result` object**, not yet loaded to the DB, that contains:
+   - `Result` (`valid?` / `errors` / `fatal?`)
+   - `attributes`
+   - `raw_payload`
+   - Errors (if invalid; `fatal` only for missing/blank shortcode)
+4. **Loader (service) takes the adapter's `Result` and inserts/updates the `post` row by shortcode**:
+   - shortcode not found → create row, `stage: scraped`
+   - shortcode found, `stage == extracted` → skip entirely, do not touch the row
+   - shortcode found, `stage != extracted` → refresh `raw_payload`, continue
+   - Adapter fatal result (no shortcode) → no `post` row
+   - `Result` reports `created` / `refreshed` / `skipped` / `no_row`
+   - Loader does not advance `stage` and never touches `is_event` / `last_error` / `stage_failed_at`
+5. **Media processing** — runs right after the Loader persists the `post` row, in the same ingestion pass:
+   - only for posts whose `post_type` is Image or Sidecar and `stage` is `scraped`
+   - fetch each image's `displayUrl` (or `childPosts[i].displayUrl` for carousels)
+   - resize to 1080px max width; compress to WebP; upload to B2 with `content_type: "image/webp"`
+   - create new `images` rows (one transaction per post)
+   - on success, `stage` advances to `media_processed`; on failure, `stage` stays put with `last_error`/`stage_failed_at` set (`raw_payload` still refreshed)
+   - no per-image status column
+6. **Extraction (LLM)** — calls once per post; the input is:
+   - the caption,
+   - all images retrieved from B2,
+   - and it returns structured fields + per-field confidence, and classifies event vs non-event, setting `is_event` (nil until `stage == extracted`).
+   - on success, `stage` advances to `extracted`.
+   
+   The prompt asks for the following features in JSON format (schema §7.1): `checks` (emitted first), `category` (enum below), `category_confidence` (0–1), `title`, `starts_date`, `starts_time`, `ends_date`, `ends_time`, `venue`, `registration_url`, `registration_via`, `members_only`, `online_only`, `confidence` (per-field 0–1), `notes`.
+   
+   Categories (closed list, §3): `event`, `reminder`, `fundraising`, `recruitment`, `recap`, `merch_or_sales`, `deadline`, `teaser`, `general_announcement`, `other` — a `clubs_and_society_registration_week` category is pending the Pass 5 reword.
+7. **Dedup (duplicate-posts detector)** — on hold, owned by the dedup plan (§13):
+   - dHash and caption-embedding (LLM-encoded, compared by cosine similarity) against the same account's last 14–21 days
+   - if positive: link the posts to a single event group
+   - on success, `stage` advances to `deduped` (the stage enum already keeps `deduped` between `media_processed` and `extracted`, so the current `extracted?` skip guard is correct until dedup lands)
+8. **Decision thresholds** — rule-based checks (valid calendar date, non-empty/reasonable venue) independent of the LLM's confidence (§8):
+   - fields below the threshold get flagged/labelled for review; fields above do not
+   - where the per-field review flag lives is resolved in §8 — three float confidence columns on the `events` row; "needs review" is a query, not a status. What counts as "below" is the Pass 5 review bar.
+
 ### 5.1 Dispatch on `post.stage`
 
 `AccountPipeline`'s per-post loop stops chaining on the previous step's result and instead lets each stage self-guard on the post's current stage:
@@ -317,16 +359,16 @@ The health plan's new section covers: recomputing the healthchecks.io **grace ti
 ## 12. Passes and worklist
 
 **Pass S — Practice run (throwaway; ships no code)**
-- [ ] **Wipe the dev DB and B2 first** — the previous dry-run rows/objects are discarded (the production box starts fresh on the E5440 anyway); Pass S begins from a clean state
-- [ ] Scrape ~10 accounts (include non-English ones) up to `media_processed` with the existing pipeline; **time it** (feeds §10)
-- [ ] Throwaway script: caption + `posted_at` + images → Gemini → raw JSON; no DB writes. Run on the 14 dry-run posts, the old images, then ~40 pool posts
-- [ ] Read outputs; log misses; revise the category list and rule wording; count how many posts land in `other`; note what confused the model (sign-ups, multiple dates, relative dates)
-- [ ] Check model ID, limits, structured-output support (including which schema keywords it accepts), and image token cost for 10-image carousels
+- [x] **Wipe the dev DB and B2 first** — the previous dry-run rows/objects are discarded (the production box starts fresh on the E5440 anyway); Pass S begins from a clean state. *Note: closed as moot in practice — the live drill-down ran against the existing fresh-scrape dry-run posts with B2-reachable media, no wipe needed (see Pass 4 note).*
+- [x] Scrape ~10 accounts (include non-English ones) up to `media_processed` with the existing pipeline; **time it** (feeds §10). *Note: 10 accounts scraped → 79 pool posts (media-only, blind), ~58 min total scrape time, 4–8 min/account sequential.*
+- [x] Throwaway script: caption + `posted_at` + images → Gemini → raw JSON; no DB writes. Run on the 14 dry-run posts, the old images, then ~40 pool posts. *Note: done via the live pipeline + throwaway runner scripts over the 79-post pool, with DB writes (extraction always persisted).*
+- [x] Read outputs; log misses; revise the category list and rule wording; count how many posts land in `other`; note what confused the model (sign-ups, multiple dates, relative dates). *Note: reviewed vs. human labels — 13/13 agreement; distribution event 27 · recap 24 · general_announcement 15 · recruitment 10 · deadline 1 · teaser 1 · other 1; fundraising/reminder/merch 0 hits. Findings recorded under Pass 5 (CSRW missing category, casting-call → recruitment, dedup groups in §13).*
+- [x] Check model ID, limits, structured-output support (including which schema keywords it accepts), and image token cost for 10-image carousels. *Note: live checks passed — responseSchema + seed + temperature 0 + thinkingConfig low accepted; no thoughtsTokenCount under schema+low; token counts verified (825 in / 252 out on 3.5-flash, ~2065/277 on lite). Model availability: 3.5/3.8-flash were in a sustained 503 spike; 3.1-flash-lite was used live. Image-token cost for a full 10-image carousel not separately measured — carousels in the pool were short.*
 
 **Pass 0 — Schema and dispatch (behavior-preserving)**
-- [ ] Migrations: `events`, `extractions`, `posts.category`; `Event`/`Extraction` models and factories (lint)
-- [ ] Stage-based dispatch in `AccountPipeline` (§5.1) with the regression test; per-post rescue and `unexpected_errors` counting
-- [ ] *Stage enum and `PostLoader` are untouched*
+- [x] Migrations: `events`, `extractions`, `posts.category`; `Event`/`Extraction` models and factories (lint)
+- [x] Stage-based dispatch in `AccountPipeline` (§5.1) with the regression test; per-post rescue and `unexpected_errors` counting
+- [x] *Stage enum and `PostLoader` are untouched*
 
 **Pass 1 — Gemini plumbing**
 - [x] `ObjectStore#get`
@@ -335,7 +377,7 @@ The health plan's new section covers: recomputing the healthchecks.io **grace ti
 **Pass 2 — Prompt, schema, parser, gate**
 - [x] `Categories`; `ExtractionPrompt` (v0 written straight from §7.2 — the practice run hasn't happened yet, Pass S rewording still applies; `VERSION`); response schema
 - [x] `ExtractionParser`, `ConfidenceGate`, Gemini payload factories, tests
-- [ ] Second category-coverage pass on the final prompt (does the list cover a good share of real posts?) — blocked on real posts, do with/after Pass S
+- [x] Second category-coverage pass on the final prompt (does the list cover a good share of real posts?) — done on the 79-post pool: 7 of 10 categories hit; `fundraising`/`reminder`/`merch_or_sales` saw 0 hits; review found `clubs_and_society_registration_week` missing (see Pass 5 note)
 
 **Pass 3 — `Extractor`**
 - [x] `Extractor` per §6, with tests
@@ -350,8 +392,10 @@ The health plan's new section covers: recomputing the healthchecks.io **grace ti
 **Pass 5 — Eval set and thresholds** *(blocks public launch, not code)*
 - [ ] Label ~50 posts blind; `clubsync:extraction_eval`; choose the review bar; revise the prompt and bump `VERSION`; confirm the category mapping (e.g. `fundraising`); run the eval set twice on one `prompt_version` to check for flip-flopping fields
 
+**Eval status on the 79-post pool (2026-09-22, ~20 posts reviewed):** precision ≈85% on event-extractions (23 confirmed / 27, with 4 false positives) — the FPs are **all one cause**: Clubs & Society Registration Week (CSRW). Bare CSRW posts and "booth at CSRW" posts (`DcnfuWmjtp2`, `DRLjN_Qklju`, `DWv8dGCEuik`, `DcYl75RvyyU`) recur every semester and are not events; the §3 `PRECEDENCE` "any time/place → event" rule over-fires on them. Decision: add a `clubs_and_society_registration_week` category (non-event) with a carve-out in the prompt, and a "casting call = recruitment (not deadline)" prompt line; the AGM/general-meeting-as-event reading is confirmed. The prompt reword + `VERSION` bump + category addition are **pending explicit go** — recorded here for the Pass 5 reword pass. `recruitment` keeps its name (a casting call is also recruitment, and renaming would orphan ~10 stored rows). The three dedup groups found during review live in §13.
+
 **Pass 6 — Langfuse (dropped from v1)**
-- [ ] **Out of v1 (2026-09-21):** `extractions` is the permanent record and the ~50-post eval set is a human process; no tracing UI, no SDK dependency, no `LlmTrace`. Revisit only if post-launch debugging demands it.
+- [x] **Out of v1 (2026-09-21):** `extractions` is the permanent record and the ~50-post eval set is a human process; no tracing UI, no SDK dependency, no `LlmTrace`. Revisit only if post-launch debugging demands it.
 
 ## 13. Deferred to the dedup session
 
@@ -359,6 +403,11 @@ Dedup is paused until this phase has produced real `events` rows. What we know s
 
 - **Annual events are not a dedup case.** A new edition has a new date and new artwork.
 - **Real pattern:** clubs post profile-grid series — several posts for one event, different graphics, often the same caption, same day — plus announcement/registration/"N days left" follow-ups. Per the maintainer, clubs' reposts of others' content do not go on their own profile grid, and the scraper only reads the grid. So the original image-based repost detection (dHash) may have little to do. Worth confirming once on a real payload.
+- **Labeled ground truth (2026-09-22 review of the 79-post pool; recorded for the dedup session, no code or DB change made):**
+  - LUNGS theatre trip (tamucyb): posts `DcfRDaVgTnf` + `DcfxBVUhY00`, anchor **`DcfxBVUhY00`**. (A review line that read "DX3aM04keXp dedup with DcfxBVUhY00" was a typo — those are different accounts/events; the real LUNGS pair is the tamucyb one.)
+  - Studio Sessions HIP-HOP (rentakmmu): `DX3aFuuEen9` + `DX3aSadEWFt` + `DX3aM04keXp`, anchor **`DX3aM04keXp`**.
+  - Industrial Visit to MIMOS (ieeemmusb): `Dc0xPgNTJaI` + `Dc0xZzTzRDJ`, anchor **`Dc0xZzTzRDJ`**.
+  - These are stored nowhere as a fixture by design — the dedup phase builds `dedup_decisions` (pair-score audit) and `event_group_id` when it lands; until then the only copy of this ground truth lives in this doc.
 - **Same account, same day, different events must stay separate** (Misi Bekal: donation, booth and volunteers posts).
 - **First hypothesis:** same account + same `starts_on` (+ compatible venue) → same event. Images and caption embeddings are tie-breakers only; **never merge on caption similarity alone**. Canonical row chosen by field completeness and confidence.
 - **Model:** two tables instead of merge columns on `events`. `event_groups` gets one row per real-world event (a post with no matches is a group of one); `events.event_group_id` is a nullable FK added by dedup; `dedup_decisions` stays a pair-score audit log only, with no foreign-key-less array field. The public site lists groups, and each card shows its best member by completeness and confidence. Changing a threshold means clearing `event_group_id`, deleting groups, and recomputing — no post state to migrate.
