@@ -14,3 +14,8 @@
 # ActiveSupport::Inflector.inflections(:en) do |inflect|
 #   inflect.acronym "RESTful"
 # end
+
+# d_hash_service.rb → DHashService (the dedup visual-phash signal service).
+ActiveSupport::Inflector.inflections(:en) do |inflect|
+  inflect.acronym "DHash"
+end

@@ -5,15 +5,33 @@ require "json"
 class DiscordNotifier
   STAGE_LABELS = {
     "media_processed" => "Media processed",
-    "extracted" => "Extracted"
+    "extracted" => "Extracted",
+    "deduped" => "Dedup"
+  }.freeze
+
+  OUTCOME_LABELS = {
+    "succeeded" => "succeeded",
+    "merged" => "merged",
+    "failed" => "failed",
+    "dead_lettered" => "dead-lettered"
   }.freeze
 
   def self.post_run_summary(run)
     new(run).post_run_summary
   end
 
-  def self.post_breaker_open
-    post_to(ENV["DISCORD_ALERTS_WEBHOOK_URL"], "**ClubSync Alert** — Gemini extraction breaker opened: 5 consecutive whole-service failures. Extraction is skipped for the rest of the run; posts wait at `media_processed` for the next pass.")
+  def self.post_gemini_outage
+    post_to(ENV["DISCORD_ALERT_WEBHOOK_URL"], "**ClubSync Alert** — Gemini extraction outage: 5 consecutive whole-service failures. Extraction is skipped for the rest of the run; posts wait at `media_processed` for the next pass.")
+  end
+
+  def self.post_quota_alert(breaches)
+    return if breaches.empty?
+
+    parts = breaches.map { |b| "#{b[:current]} of #{b[:cap]} #{b[:metric]}" }
+    post_to(
+      ENV["DISCORD_ALERT_WEBHOOK_URL"],
+      "**ClubSync Alert** — Gemini daily usage crossed 80% of the soft cap: #{parts.join(', ')}. Extraction may start hitting rate limits before the cap resets."
+    )
   end
 
   def self.post_to(url, content)
@@ -60,9 +78,19 @@ class DiscordNotifier
       lines << ""
       lines << "**Stage results:**"
       @run.stage_results.each do |stage, outcomes|
-        parts = %w[succeeded failed].filter_map { |outcome| "#{outcomes[outcome]} #{outcome}" if outcomes[outcome].present? }
+        parts = %w[succeeded merged failed dead_lettered].filter_map do |outcome|
+          next unless outcomes[outcome].present?
+
+          "#{outcomes[outcome]} #{OUTCOME_LABELS.fetch(outcome)}"
+        end
         lines << "- #{STAGE_LABELS.fetch(stage, stage)}: #{parts.join(', ')}"
       end
+    end
+
+    if @run.token_usage.present?
+      usage = @run.token_usage
+      lines << ""
+      lines << "Gemini usage: #{usage['requests']} requests, #{usage['input_tokens']} input + #{usage['output_tokens']} output tokens"
     end
 
     if @run.unexpected_errors&.positive?

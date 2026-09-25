@@ -1,7 +1,7 @@
 # Pure rule checks on the parser's canonical attributes (plan §8). Runs
 # regardless of what the LLM reports; posts still advance to `extracted`,
 # bad fields just become nil or low-confidence. Never touches the DB.
-class ConfidenceGate
+class ConfidenceThreshold
   PLACEHOLDER_PATTERN = /\A\s*(?:tba|tbd|tbc|na|n\/a|unknown|-)\s*\z/i
   MIN_VENUE_LENGTH = 2
   MAX_VENUE_LENGTH = 200
@@ -14,15 +14,15 @@ class ConfidenceGate
 
   # Returns a new attribute hash (input is not mutated).
   def apply(attributes, posted_at: nil)
-    gated = attributes.dup
-    gated[:confidence] = gated[:confidence] ? gated[:confidence].dup : {}
-    gated[:venue], gated[:confidence][:venue] = sanitize_venue(
-      gated[:venue],
-      gated[:confidence].fetch(:venue, 0.0)
+    thresholded = attributes.dup
+    thresholded[:confidence] = thresholded[:confidence] ? thresholded[:confidence].dup : {}
+    thresholded[:venue], thresholded[:confidence][:venue] = sanitize_venue(
+      thresholded[:venue],
+      thresholded[:confidence].fetch(:venue, 0.0)
     )
-    drop_ends_before_start(gated)
-    cap_starts_at_beyond_window(gated, posted_at && posted_at.to_date)
-    gated
+    drop_ends_before_start(thresholded)
+    cap_starts_at_beyond_window(thresholded, posted_at && posted_at.to_date)
+    thresholded
   end
 
   private

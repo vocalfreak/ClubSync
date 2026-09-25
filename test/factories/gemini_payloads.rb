@@ -147,6 +147,18 @@ FactoryBot.define do
       confidence { { "title" => 0.0, "starts_at" => 0.0, "venue" => 0.0 } }
     end
 
+    trait :club_and_society_registration_week do
+      category { "club_and_society_registration_week" }
+      checks { { "has_date" => true, "has_time" => true, "has_venue" => true, "asks_signup" => false, "asks_donation" => false, "qr_code_seen" => true } }
+      title { "CSRW booth" }
+      starts_date { "2026-09-02" }
+      starts_time { "10:00" }
+      ends_date { "2026-09-03" }
+      ends_time { "17:00" }
+      venue { "CLC" }
+      confidence { { "title" => 0.9, "starts_at" => 0.9, "venue" => 0.9 } }
+    end
+
     # Failure traits — structurally plausible but invalid.
     trait :bad_category do
       category { "mystery_category" }

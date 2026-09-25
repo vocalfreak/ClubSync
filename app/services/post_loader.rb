@@ -40,7 +40,7 @@ class PostLoader
       return Result.new(outcome: :created, adapter_result: adapter_result, post: post)
     end
 
-    return Result.new(outcome: :skipped, adapter_result: adapter_result, post: post) if post.extracted?
+    return Result.new(outcome: :skipped, adapter_result: adapter_result, post: post) if post.deduped?
 
     # raw_payload always overwrites
     # Other Fields only gets overwritten when the new scrape json has a value

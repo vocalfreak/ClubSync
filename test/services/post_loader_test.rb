@@ -20,8 +20,8 @@ class PostLoaderTest < ActiveSupport::TestCase
     assert_nil post.last_error
   end
 
-  test "skips entirely when the existing post is already extracted" do
-    existing = create(:post, :extracted, shortcode: "ABC12345678")
+  test "skips entirely when the existing post is already deduped" do
+    existing = create(:post, :deduped, shortcode: "ABC12345678")
     apify_post = build(:apify_image_post, short_code: "ABC12345678", caption: "totally different caption now")
 
     result = Adapters::Apify::PostAdapter.new.parse_post(apify_post)
@@ -30,6 +30,19 @@ class PostLoaderTest < ActiveSupport::TestCase
     assert loader_result.skipped?
     existing.reload
     refute_equal "totally different caption now", existing.caption
+  end
+
+  test "refreshes an extracted post: extraction output is finished, but dedup (the terminal stage) has not run yet" do
+    existing = create(:post, :extracted, shortcode: "ABC12345678", caption: "old caption")
+    apify_post = build(:apify_image_post, short_code: "ABC12345678", caption: "updated caption")
+
+    result = Adapters::Apify::PostAdapter.new.parse_post(apify_post)
+    loader_result = PostLoader.call(result)
+
+    assert loader_result.refreshed?
+    existing.reload
+    assert_equal "updated caption", existing.caption
+    assert existing.extracted?, "a refresh does not advance or move a stage"
   end
 
   test "refreshes every mapped attribute (including raw_payload) when the post exists but isn't extracted yet" do
@@ -141,7 +154,7 @@ class PostLoaderTest < ActiveSupport::TestCase
   end
 
   test "does not set last_ingestion_run_id on skip" do
-    existing = create(:post, :extracted, shortcode: "ABC12345678", last_ingestion_run_id: nil)
+    existing = create(:post, :deduped, shortcode: "ABC12345678", last_ingestion_run_id: nil)
     run = create(:ingestion_run)
     apify_post = build(:apify_image_post, short_code: "ABC12345678")
 

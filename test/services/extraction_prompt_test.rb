@@ -1,8 +1,8 @@
 require "test_helper"
 
 class ExtractionPromptTest < ActiveSupport::TestCase
-  test "VERSION is the hand-bumped v0" do
-    assert_equal "v0", ExtractionPrompt::VERSION
+  test "the hand-bumped version is v3 (recap-wins + QR precision landed 2026-09-24)" do
+    assert_equal "v3", ExtractionPrompt::VERSION
   end
 
   test "generation_config requests JSON with the frozen schema, checks first" do
@@ -30,6 +30,14 @@ class ExtractionPromptTest < ActiveSupport::TestCase
     assert_includes ExtractionPrompt::SYSTEM_INSTRUCTION, "PRECEDENCE"
     assert_includes ExtractionPrompt::SYSTEM_INSTRUCTION, "reminder"
     assert_includes ExtractionPrompt::SYSTEM_INSTRUCTION, "YYYY-MM-DD"
+  end
+
+  test "v3 bakes in recap-wins precedence and the QR-visuals-only precision rule" do
+    instruction = ExtractionPrompt::SYSTEM_INSTRUCTION
+    assert_includes instruction, "RECAP WINS"
+    assert_includes instruction, "restating the past date/venue"
+    assert_includes instruction, "Huge thanks to everyone who came to our charity night last Friday!\" => recap"
+    assert_includes instruction, "qr_code_seen is true ONLY when a clearly visible QR code is actually printed in one of the images"
   end
 
   test "user_text embeds the caption and the local posted date" do

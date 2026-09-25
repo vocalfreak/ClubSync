@@ -42,3 +42,9 @@
 
 # ignore opencode config
 .opencode
+
+# dev database snapshots (clubsync:snapshot)
+backups/
+
+# apify dataset exports (clubsync replay)
+data/apify_export/

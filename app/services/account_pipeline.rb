@@ -7,13 +7,14 @@ class AccountPipeline
     end
   end
 
-  def self.call(account, ingestion_run_id: nil, breaker: nil, gemini_client: nil)
-    new.call(account, ingestion_run_id: ingestion_run_id, breaker: breaker, gemini_client: gemini_client)
+  def self.call(account, ingestion_run_id: nil, outage: nil, gemini_client: nil)
+    new.call(account, ingestion_run_id: ingestion_run_id, outage: outage, gemini_client: gemini_client)
   end
 
-  def call(account, ingestion_run_id: nil, breaker: nil, gemini_client: nil)
-    @breaker = breaker
+  def call(account, ingestion_run_id: nil, outage: nil, gemini_client: nil)
+    @outage = outage
     @gemini_client = gemini_client
+    @ingestion_run_id = ingestion_run_id
     @posts_scraped = 0
     @stage_results = {}
     @unexpected_errors = 0
@@ -43,10 +44,10 @@ class AccountPipeline
       tally(:media_processed, MediaProcessor.call(post, raw_payload: raw))
     end
 
-    if post.media_processed? && !@breaker&.open?
-      extraction = Extractor.call(post, client: @gemini_client)
+    if post.media_processed? && !@outage&.active?
+      extraction = Extractor.call(post, client: @gemini_client, ingestion_run_id: @ingestion_run_id)
       tally(:extracted, extraction)
-      @breaker&.record(extraction)
+      @outage&.record(extraction)
     end
   rescue StandardError => e
     record_unexpected(post, e)
@@ -57,8 +58,15 @@ class AccountPipeline
   end
 
   # Only succeeded/failed are tallied; :skipped means the post was already
-  # past the stage and contributes nothing to the run's stage breakdown.
+  # past the stage and contributes nothing to the run's stage breakdown. The
+  # one exception: a dead-lettered skip is tallied under its own outcome so
+  # the run summary shows how many posts the queue decided to stop retrying.
   def tally(stage, result)
+    if result.respond_to?(:dead_lettered?) && result.dead_lettered?
+      @stage_results[stage.to_s] ||= {}
+      @stage_results[stage.to_s]["dead_lettered"] = @stage_results[stage.to_s].fetch("dead_lettered", 0) + 1
+      return
+    end
     return if result.skipped?
 
     @stage_results[stage.to_s] ||= {}

@@ -3,6 +3,7 @@ require "test_helper"
 class GeminiClientTest < ActiveSupport::TestCase
   API_KEY = "gemini_api_test_key".freeze
   MODEL = "gemini-3.8-flash".freeze
+  EMBED_MODEL = "gemini-embedding-2".freeze
 
   SUCCESS_BODY = JSON.generate(
     "candidates" => [
@@ -17,6 +18,11 @@ class GeminiClientTest < ActiveSupport::TestCase
       "totalTokenCount" => 473
     },
     "modelVersion" => "gemini-3.8-flash"
+  ).freeze
+
+  EMBED_SUCCESS_BODY = JSON.generate(
+    "embedding" => { "values" => [ 0.1, -0.2, 0.95, 0.0004 ] },
+    "modelVersion" => "gemini-embedding-2"
   ).freeze
 
   CONTENTS = [
@@ -59,11 +65,13 @@ class GeminiClientTest < ActiveSupport::TestCase
   def setup
     ENV["GEMINI_API_KEY"] = API_KEY
     ENV["GEMINI_MODEL"] = MODEL
+    ENV["GEMINI_EMBED_MODEL"] = EMBED_MODEL
   end
 
   def teardown
     ENV.delete("GEMINI_API_KEY")
     ENV.delete("GEMINI_MODEL")
+    ENV.delete("GEMINI_EMBED_MODEL")
   end
 
   def build_response(klass, code, message, body: nil)
@@ -248,6 +256,86 @@ class GeminiClientTest < ActiveSupport::TestCase
 
     error = assert_raises(RuntimeError) { extract(http: FakeHTTP.new) }
     assert_match(/GEMINI_MODEL is not set/, error.message)
+  end
+
+  test "embed hits the embedContent endpoint for GEMINI_EMBED_MODEL and returns the vector" do
+    http = FakeHTTP.new(build_response(Net::HTTPOK, "200", "OK", body: EMBED_SUCCESS_BODY))
+
+    response = GeminiClient.embed(text: "Riddim night at Memory", http: http)
+
+    assert_equal [ 0.1, -0.2, 0.95, 0.0004 ], response.values
+    assert_equal EMBED_MODEL, response.model
+    assert_equal "/v1beta/models/gemini-embedding-2:embedContent", http.last_request.path
+    assert_request_shape(http.last_request)
+  end
+
+  test "embed sends the caption and the full models/ name in the body" do
+    http = FakeHTTP.new(build_response(Net::HTTPOK, "200", "OK", body: EMBED_SUCCESS_BODY))
+
+    GeminiClient.embed(text: "Riddim night", http: http)
+
+    body = JSON.parse(http.last_request.body)
+    assert_equal "models/gemini-embedding-2", body["model"]
+    assert_equal({ "parts" => [ { "text" => "Riddim night" } ] }, body["content"])
+  end
+
+  test "embed uses the passed model regardless of GEMINI_EMBED_MODEL" do
+    http = FakeHTTP.new(build_response(Net::HTTPOK, "200", "OK", body: EMBED_SUCCESS_BODY))
+
+    GeminiClient.embed(text: "x", model: "gemini-embedding-test", http: http)
+
+    assert_equal "/v1beta/models/gemini-embedding-test:embedContent", http.last_request.path
+  end
+
+  test "embed reuses the extract error taxonomy" do
+    timeout = FakeHTTP.new(error: Net::OpenTimeout)
+    assert_raises(GeminiClient::TimeoutError) { GeminiClient.embed(text: "x", http: timeout) }
+
+    rate_limited = FakeHTTP.new(build_response(Net::HTTPTooManyRequests, "429", "Too Many Requests"))
+    assert_raises(GeminiClient::RateLimitedError) { GeminiClient.embed(text: "x", http: rate_limited) }
+  end
+
+  test "embed raises InvalidResponseError when the response has no embedding values" do
+    http = FakeHTTP.new(build_response(Net::HTTPOK, "200", "OK", body: JSON.generate("embedding" => {})))
+
+    assert_raises(GeminiClient::InvalidResponseError) { GeminiClient.embed(text: "x", http: http) }
+  end
+
+  test "embed raises when GEMINI_EMBED_MODEL is not configured, even if GEMINI_MODEL is" do
+    ENV.delete("GEMINI_EMBED_MODEL")
+
+    error = assert_raises(RuntimeError) { GeminiClient.embed(text: "x", http: FakeHTTP.new) }
+    assert_match(/GEMINI_EMBED_MODEL is not set/, error.message)
+  end
+
+  test "hard-fails with PayloadTooLargeError when the serialized body exceeds the hard limit" do
+    huge = [ { "role" => "user", "parts" => [ { "text" => "x" * GeminiClient::HARD_LIMIT } ] } ]
+    http = FakeHTTP.new
+
+    error = assert_raises(GeminiClient::PayloadTooLargeError) { extract(http: http, contents: huge) }
+
+    assert_match(/exceeds the #{GeminiClient::HARD_LIMIT} byte hard limit/, error.message)
+    assert_nil http.last_request, "the oversized body never hits the transport"
+  end
+
+  test "soft-warns but still sends when the serialized body sits between the soft and hard limits" do
+    body = [ { "role" => "user", "parts" => [ { "text" => "x" * GeminiClient::SOFT_LIMIT } ] } ]
+    warnings = []
+    fake_logger = Object.new
+    fake_logger.define_singleton_method(:warn) { |msg| warnings << msg }
+    http = FakeHTTP.new(build_response(Net::HTTPOK, "200", "OK", body: SUCCESS_BODY))
+    original_logger = Rails.logger
+
+    Rails.logger = fake_logger
+    begin
+      response = extract(http: http, contents: body)
+      assert_equal({ "category" => "event", "title" => "Riddim night" }, response.parsed)
+    ensure
+      Rails.logger = original_logger
+    end
+
+    assert_equal 1, warnings.length
+    assert_match(/over the #{GeminiClient::SOFT_LIMIT} byte soft limit/, warnings.first)
   end
 
   private

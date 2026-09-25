@@ -4,7 +4,7 @@ class CategoriesTest < ActiveSupport::TestCase
   test "the list is frozen and closed" do
     assert Categories.all.frozen?
     assert_equal(
-      %w[event reminder fundraising recruitment recap merch_or_sales deadline teaser general_announcement other],
+      %w[event club_and_society_registration_week reminder fundraising recruitment recap merch_or_sales deadline teaser general_announcement other],
       Categories.all
     )
     Categories.all.each { |category| assert Categories.include?(category) }

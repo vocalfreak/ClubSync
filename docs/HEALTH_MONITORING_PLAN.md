@@ -142,7 +142,7 @@ No Discord bot is needed — webhooks are sufficient for one-way posting. The ap
 - Status (finished / finished with N failures / crashed)
 - Accounts processed / failed, posts scraped
 - Failed accounts list (if any)
-- Per-stage breakdown (if any posts didn't reach `extracted`)
+- Per-stage breakdown (if any posts didn't reach `deduped`, the terminal stage; **Phase 2 forward:** dedup is a run-level end-of-run pass that writes a `"deduped"` tally into `stage_results` — evaluated pairs, merged, separate — which the summary renders like any other stage via the existing per-stage row; see `docs/DEDUPLICATION_IMPLEMENTATION_PLAN.md` §10)
 - Duration (`finished_at - started_at`)
 
 The app only ever posts to `DISCORD_LOG_WEBHOOK_URL`. It never posts to the alert channel — that's healthchecks.io's job, configured on their end (see below), keeping the "which channel gets which kind of message" decision in one place instead of split across two codebases. Uses stdlib `Net::HTTP` (same approach as `MediaProcessor#fetch_image`) — no new HTTP dependency.
@@ -175,6 +175,7 @@ HEALTHCHECKS_PING_URL=https://hc-ping.com/<check-uuid>
 ## 6. Explicitly deferred (not this doc)
 
 - **Public-site uptime monitoring** (Phase 5) — separate tool (e.g. UptimeRobot/Better Stack free tier) hitting the Cloudflare Tunnel URL, alerts into `#clubsync-alerts`. Not needed until the tunnel exists.
+- **Dedup stage reporting** (Phase 2, forward-looking) — when dedup lands, `IngestionRunner` runs the end-of-run dedup pass and tallies a `"deduped"` key into `stage_results` (`succeeded` split into evaluated/`merged`/`separate`, plus `failed`; posts stuck earlier are not tallied there, matching the other stages). Dedup failures never crash the run: the pass is hermetic by spec (dedup plan §10.1) — it can neither set run status `crashed` nor `/fail` healthchecks.io — and failures are attributed through the `deduped` stage key itself (run tally) and per-post `last_error`/`stage_failed_at`. Two small Phase 2 changes at build time: `DiscordNotifier::STAGE_LABELS` gains `"deduped" => "Dedup"` (one-line label instead of the raw-key fallback), and nothing else — §4.2 already renders a per-stage row. Spec: `docs/DEDUPLICATION_IMPLEMENTATION_PLAN.md` §10.
 - **Rack::Attack abuse alerts** (Phase 5) — will need debouncing/batching into one alert per abuse episode rather than one Discord message per blocked request, same shape of problem already solved here for per-account failures. Design when Phase 5 is actually being built, not now.
 - **Sentry / exception tracebacks** — `IngestionRun.notes` captures a truncated backtrace for crashes, which may be enough for a solo project. Revisit only if that's not enough to debug from in practice.
 - **Host-level checks** (disk, B2 usage) — out of scope until there's more than a skeleton backend.

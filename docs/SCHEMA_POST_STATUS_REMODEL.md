@@ -1,6 +1,6 @@
 # ClubSync — Post Status Model: Decisions
 
-**Status · September 16, 2026:** All schema/decision content here is shipped — `posts.stage` (integer enum), `is_event`, `last_error`, `stage_failed_at` live in the app (migration `20260915000000`); `SCHEMA_POST_STATUS_REMODEL`'s "Loader routing logic" was later refined by `docs/POST_LODAER_IMPLEMENTATION_PLAN.md` (Loader no longer advances stage at all). The "Still open" item below (where per-field extraction confidence is stored) remains open — Phase 3 concern.
+**Status · September 16, 2026:** All schema/decision content here is shipped — `posts.stage` (integer enum), `is_event`, `last_error`, `stage_failed_at` live in the app (migration `20260915000000`); `SCHEMA_POST_STATUS_REMODEL`'s "Loader routing logic" was later refined by `docs/POST_LODAER_IMPLEMENTATION_PLAN.md` (Loader no longer advances stage at all). The "Still open" item below (where per-field extraction confidence is stored) was resolved by Phase 3 as three float columns on `events` (`title_confidence` / `starts_at_confidence` / `venue_confidence` — see `docs/EXTRACTION_IMPLEMENTATION_PLAN.md` §8, not the `per_field_confidence` jsonb an earlier draft named). **2026-09-23:** the stage order shown in §Schema changes is the *shipped* order; dedup (Phase 2) reorders to `scraped → media_processed → extracted → deduped` with `deduped` terminal — `docs/DEDUPLICATION_IMPLEMENTATION_PLAN.md` §1.
 
 Supersedes the old single `posts.status` enum (`pending`/`done`/`needs_review`/`rejected`/`failed`) and the retry logic tied to it.
 

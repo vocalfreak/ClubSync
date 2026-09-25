@@ -85,7 +85,9 @@ class MediaProcessorTest < ActiveSupport::TestCase
     assert_equal 1080, image.width
     assert_equal 1350, image.height
     assert_equal object_store.calls.first[:bytes].bytesize, image.byte_size
-    assert_nil image.dhash
+    assert_match(/\A\h{16}\z/, image.dhash, "media processing populates the 64-bit dHash signal")
+    assert_equal image.dhash, DHashService.compute(object_store.calls.first[:bytes]),
+      "the persisted dHash matches the one for the stored WebP bytes"
   end
 
   test "processes Sidecar images in childPosts order with 0-indexed positions" do

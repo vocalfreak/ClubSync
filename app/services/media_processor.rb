@@ -92,14 +92,33 @@ class MediaProcessor
       content_type: CONTENT_TYPE,
       width: processed[:width],
       height: processed[:height],
-      byte_size: processed[:bytes].bytesize
+      byte_size: processed[:bytes].bytesize,
+      dhash: processed[:dhash]
     )
   end
 
   def resize_and_encode(bytes)
     image = Vips::Image.new_from_buffer(bytes, "", access: :sequential)
     image = image.resize(MAX_WIDTH.to_f / image.width) if image.width > MAX_WIDTH
-    { width: image.width, height: image.height, bytes: image.write_to_buffer(".webp") }
+    webp = image.write_to_buffer(".webp")
+    {
+      width: image.width,
+      height: image.height,
+      bytes: webp,
+      dhash: dhash_of(webp)
+    }
+  end
+
+  # dHash is an auxiliary signal for the dedup stage — an undecodable edge case
+  # must not sink media processing, so a dHash miss leaves a nil column and the
+  # visual channel simply reads as undefined for that image. Computed from the
+  # encoded WebP (a fresh random-access decode) because the source image is
+  # sequential-access and can't be traversed twice.
+  def dhash_of(bytes)
+    DHashService.compute(bytes)
+  rescue Vips::Error => e
+    Rails.logger.warn("MediaProcessor: dhash unavailable for post #{@post.shortcode}: #{e.message}")
+    nil
   end
 
   def fail!(error)

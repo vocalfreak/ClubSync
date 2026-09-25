@@ -1,15 +1,28 @@
 # Prompt text + JSON response schema + VERSION. v0 is written straight from
 # the plan's §7.2 rules (the practice run, Pass S, may reword after real
 # outputs); VERSION is bumped by hand and stored as `extractions.prompt_version`.
+# v1 (2026-09-24): added the CSRW category (outranks event — booth/week posts
+# are csrw, never event cards).
+# v2 (2026-09-24): renamed the category value to `club_and_society_registration_week`
+# (the descriptive value the model picks on), anchored all caption spellings +
+# the "recruitment week" synonym, and added the boundary axis + few-shot
+# cheat sheet.
+# v3 (2026-09-24): recap-wins precedence (a post that only re-points at an
+# already-announced event is reminder/recap, never an event card — fixes
+# DdI3NLXHeYN), and qr_code_seen is true only when a clearly visible QR code is
+# actually printed in an image, never inferred from caption wording — fixes
+# Dc0xZzTzRDJ's false positive.
 #
 # Pure: builds strings and hashes, never touches the DB or network.
 class ExtractionPrompt
-  VERSION = "v0".freeze
+  VERSION = "v3".freeze
   TIMEZONE = "Asia/Kuala_Lumpur".freeze
   SEED = 12345
   # 3.5-flash runs thinking on by default (medium). "low" trims the billed
-  # thought tokens and latency; extraction doesn't need deep reasoning.
-  THINKING_LEVEL = "low".freeze
+  # thought tokens and latency; extraction doesn't need deep reasoning. Env-
+  # overridable ("high" for A/B eval) without touching the prompt content —
+  # VERSION stays the prompt's, not the runtime config's.
+  THINKING_LEVEL = ENV.fetch("GEMINI_THINKING_LEVEL", "low").freeze
 
   BOOLEAN_SCHEMA = { "type" => "boolean" }.freeze
   NUMBER_SCHEMA = { "type" => "number" }.freeze
@@ -75,9 +88,19 @@ class ExtractionPrompt
 
     NOT events: committee/club recruitment, recaps of past events, merch sales, deadlines, teasers ("something big is coming" with no time and no place), and reminder/countdown follow-ups pointing at an already-announced event.
 
-    PRECEDENCE: if the post gives a specific time and/or place people can attend or join, the category is ALWAYS "event" regardless of topic — even if it also asks for sign-ups or donations. Topic categories ("fundraising", "recruitment", ...) apply only when there is no attendable time or place.
+    PRECEDENCE: if the post gives a specific time and/or place people can attend or join, the category is ALWAYS "event" regardless of topic — even if it also asks for sign-ups or donations. Topic categories ("fundraising", "recruitment", ...) apply only when there is no attendable time or place. EXCEPTION: a Club & Society Registration Week booth (below) is #{Categories::CSRW}, never "event". RECAP WINS: a post that only re-points at an already-announced event — a reminder/countdown, a thank-you, or a post-event recap restating the past date/venue — is never "event"; it is "reminder" or "recap" even though it names that time and place. A recap that additionally announces a NEW upcoming session with its own time/place IS an event.
 
-    CATEGORIES (exactly one): event, reminder, fundraising, recruitment, recap, merch_or_sales, deadline, teaser, general_announcement, other.
+    BUILDING THE WEEK CATEGORY "#{Categories::CSRW}": Club & Society Registration Week is the annual university-wide welcome week; captions may write "CSRW", "Club & Society Registration Week", "Club and Society Recruitment Week", or just mention "registration week". A post is #{Categories::CSRW} when it is ABOUT the week itself: the week's own invites, a club's booth/lucky-draw promo "during CSRW", sign-ups for the booth, and the post-week thank-you/recap. #{Categories::CSRW} always outranks "event" for such content, even when it names a booth, time or place. A post ONLY about some other standalone event that happens to land in that week, unrelated to registration (a troupe's show, a talk), stays "event" — it is attended, not a registration statement.
+
+    CATEGORIES (exactly one of): #{Categories.all.join(", ")}.
+
+    CHEAT SHEET — decide like this:
+      "Come find our booth during CSRW! CLC, 10am-5pm" => #{Categories::CSRW}
+      "Thanks to everyone who visited our booth at CSRW!" => #{Categories::CSRW}
+      "Tickets for our production, 5 Nov, Kancil Hall" => event
+      "Join our committee - no experience needed" => recruitment
+      "2 days left to register for the battle!" => reminder
+      "Huge thanks to everyone who came to our charity night last Friday!" => recap
 
     SIGN-UPS are an attribute of an event, never a category and never the event's date. A sign-up or booth window mentioned inside another event's post is not that event's date.
 
@@ -87,7 +110,7 @@ class ExtractionPrompt
 
     SEVERAL EVENTS: report the main (first) one and say so in the notes field.
 
-    LANGUAGE & SOURCES: captions and posters may be English, Malay, Chinese, Arabic, Tamil, or mixed. Copy title and venue exactly as written (title from the caption, venue as written). Poster text wins for date, time and venue; caption wins for title; a conflict lowers confidence. A QR code is only a hint that the post is a sign-up-bearing event poster — never guess where it points. registration_url must come from caption text only.
+    LANGUAGE & SOURCES: captions and posters may be English, Malay, Chinese, Arabic, Tamil, or mixed. Copy title and venue exactly as written (title from the caption, venue as written). Poster text wins for date, time and venue; caption wins for title; a conflict lowers confidence. qr_code_seen is true ONLY when a clearly visible QR code is actually printed in one of the images — never inferred from context, from "scan", "QR" or "register at" wording in the caption, or from a sign-up link. registration_url must come from caption text only.
 
     NULL OVER GUESSING: use null rather than guessing, and report low confidence rather than silence. confidence is always a number 0-1 per field (title, starts_at, venue); category_confidence is 0-1.
   PROMPT

@@ -7,7 +7,7 @@ require "json"
 # (that gem is an unofficial 0.1.1 single-author port with no request
 # timeouts and error classes that clash with this taxonomy).
 class GeminiClient
-  # Whole-service failures — the run cannot continue and the breaker counts us.
+  # Whole-service failures — the run cannot continue and the outage tracker counts us.
   class TimeoutError < StandardError; end
   class RateLimitedError < StandardError; end
   class AuthError < StandardError; end
@@ -16,14 +16,21 @@ class GeminiClient
   # This-post failures — retried by a later run, never fatal to the run.
   class BlockedError < StandardError; end
   class InvalidResponseError < StandardError; end
+  class PayloadTooLargeError < StandardError; end
 
   ENDPOINT_HOST = "generativelanguage.googleapis.com".freeze
   OPEN_TIMEOUT = 30
   READ_TIMEOUT = 120
+  # Payload preflight (plan §2): over the serialized request body. Soft-warn
+  # (log only) past SOFT_LIMIT; hard-fail past HARD_LIMIT — beyond that Gemini
+  # will reject the body anyway, so don't spend the round-trip.
+  SOFT_LIMIT = 12 * 1024 * 1024
+  HARD_LIMIT = 18 * 1024 * 1024
   BLOCKED_ERROR_STATUSES = %w[SAFETY RECITATION PROMPT_BLOCKED BLOCKED].freeze
   BLOCKED_FINISH_REASONS = %w[SAFETY PROHIBITED_CONTENT BLOCKLIST].freeze
 
   Response = Struct.new(:text, :parsed, :prompt_tokens, :candidates_tokens, :duration_ms, :model, keyword_init: true)
+  EmbedResponse = Struct.new(:values, :model, keyword_init: true)
 
   # `contents` is the pre-built request body (caption text + inline images);
   # `generation_config` carries the JSON response schema. Both are built by the
@@ -36,32 +43,88 @@ class GeminiClient
     )
   end
 
-  def initialize(model: nil, http: nil)
-    @model = model || ENV["GEMINI_MODEL"].to_s.strip
-    raise "GEMINI_MODEL is not set" if @model.empty?
+  def initialize(model: nil, http: nil, env_key: "GEMINI_MODEL")
+    @model = model || ENV[env_key].to_s.strip
+    raise "#{env_key} is not set" if @model.empty?
 
     @http = http
   end
 
+  # The embedding sibling of `extract` (dedup plan §3): hits
+  # `models/<model>:embedContent` and returns a vector instead of candidates,
+  # so it shares the error taxonomy and the injectable-http pattern but is not
+  # a fork of the generateContent path. The model comes from a separate
+  # GEMINI_EMBED_MODEL env key — reuse of GEMINI_MODEL is forbidden.
+  def self.embed(text:, model: nil, http: nil)
+    new(model: model, http: http, env_key: "GEMINI_EMBED_MODEL").embed(text: text)
+  end
+
   def extract(contents:, system_instruction: nil, generation_config: nil)
-    body = { contents: contents }
-    body[:systemInstruction] = { parts: [ { text: system_instruction } ] } if system_instruction
-    body[:generationConfig] = generation_config if generation_config
+    serialized = request_body(contents: contents, system_instruction: system_instruction, generation_config: generation_config)
+    preflight_size!(serialized)
 
     uri = URI.parse("https://#{ENDPOINT_HOST}/v1beta/models/#{@model}:generateContent")
     started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    handle_response(http_for(uri).request(build_request(uri, body)), started_at)
+    handle_response(http_for(uri).request(build_request(uri, serialized)), started_at)
+  rescue Net::OpenTimeout, Net::ReadTimeout, Timeout::Error => e
+    raise TimeoutError, "Gemini request timed out: #{e.class}: #{e.message}"
+  end
+
+  # Shared body assembly: the same bytes the transport sends, exposed so local
+  # tools (e.g. the payload-measurement rake task) can measure without a network
+  # call. Public and idempotent.
+  def self.request_body(contents:, system_instruction: nil, generation_config: nil)
+    body = { contents: contents }
+    body[:systemInstruction] = { parts: [ { text: system_instruction } ] } if system_instruction
+    body[:generationConfig] = generation_config if generation_config
+    JSON.generate(body)
+  end
+
+  def embed(text:)
+    serialized = request_body_for_embed(text)
+    preflight_size!(serialized)
+    uri = URI.parse("https://#{ENDPOINT_HOST}/v1beta/models/#{@model}:embedContent")
+    started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    handle_embed_response(http_for(uri).request(build_request(uri, serialized)), started_at)
   rescue Net::OpenTimeout, Net::ReadTimeout, Timeout::Error => e
     raise TimeoutError, "Gemini request timed out: #{e.class}: #{e.message}"
   end
 
   private
 
-  def build_request(uri, body)
+  def request_body_for_embed(text)
+    JSON.generate(model: "models/#{@model}", content: { parts: [ { text: text } ] })
+  end
+
+  def handle_embed_response(response, started_at)
+    raise_error_for(response) unless response.is_a?(Net::HTTPSuccess)
+
+    data = parse_json(response.body, "Gemini returned non-JSON")
+    values = data.dig("embedding", "values")
+    raise InvalidResponseError, "Gemini returned no embedding values" if values.nil? || values.empty?
+
+    EmbedResponse.new(values: values, model: data["modelVersion"] || @model)
+  end
+
+  def request_body(contents:, system_instruction: nil, generation_config: nil)
+    self.class.request_body(contents: contents, system_instruction: system_instruction, generation_config: generation_config)
+  end
+
+  def preflight_size!(serialized)
+    bytes = serialized.bytesize
+    if bytes >= HARD_LIMIT
+      raise PayloadTooLargeError,
+            "Gemini payload too large: #{bytes} bytes exceeds the #{HARD_LIMIT} byte hard limit"
+    end
+
+    Rails.logger.warn("Gemini payload is #{bytes} bytes, over the #{SOFT_LIMIT} byte soft limit") if bytes >= SOFT_LIMIT
+  end
+
+  def build_request(uri, serialized)
     request = Net::HTTP::Post.new(uri)
     request["x-goog-api-key"] = api_key
     request["Content-Type"] = "application/json"
-    request.body = JSON.generate(body)
+    request.body = serialized
     request
   end
 

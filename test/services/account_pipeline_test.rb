@@ -135,65 +135,65 @@ class AccountPipelineTest < ActiveSupport::TestCase
     end
   end
 
-  test "records a whole-service extraction failure onto the breaker" do
+  test "records a whole-service extraction failure onto the outage tracker" do
     existing = create(:post, :media_processed)
     raw_post = build(:apify_image_post, short_code: existing.shortcode)
-    breaker = GeminiBreaker.new
+    outage = GeminiOutage.new
 
     stub_apify_client([ raw_post ]) do
       stub_media_processor do
         stub_extractor_with(->(_post) { Extractor::Result.new(status: :failed, error_kind: :whole_service, error: "quota") }) do
-          result = AccountPipeline.call(@account, breaker: breaker)
+          result = AccountPipeline.call(@account, outage: outage)
 
           assert result.success?
-          assert_equal 1, breaker.consecutive_failures
-          refute breaker.open?
+          assert_equal 1, outage.consecutive_failures
+          refute outage.active?
           assert_equal({ "extracted" => { "failed" => 1 } }, result.stage_results)
         end
       end
     end
   end
 
-  test "opens the breaker at 5: the 5th whole-service failure skips extraction for the rest of the run" do
+  test "activates the outage at 5: the 5th whole-service failure skips extraction for the rest of the run" do
     posts = Array.new(6) { build(:apify_image_post) }
-    breaker = GeminiBreaker.new
+    outage = GeminiOutage.new
     extract_calls = []
 
     stub_apify_client(posts) do
       stub_media_processor_with(->(post) { post.media_processed!; MediaProcessor::Result.new(status: :success) }) do
         stub_extractor_with(->(_post) { Extractor::Result.new(status: :failed, error_kind: :whole_service, error: "quota") }, extract_calls) do
-          result = AccountPipeline.call(@account, breaker: breaker)
+          result = AccountPipeline.call(@account, outage: outage)
 
           assert result.success?
-          assert breaker.open?, "five consecutive whole-service failures open the breaker"
-          assert_equal 5, extract_calls.length, "the 6th post's extraction is skipped while open"
+          assert outage.active?, "five consecutive whole-service failures activate the outage"
+          assert_equal 5, extract_calls.length, "the 6th post's extraction is skipped once active"
           assert_equal(
             { "media_processed" => { "succeeded" => 6 }, "extracted" => { "failed" => 5 } },
             result.stage_results
           )
           refute_includes extract_calls.map(&:first), Post.find_by(shortcode: posts.last["shortCode"]),
-            "the post behind the open breaker is never handed to the extractor"
+            "the post behind the active outage is never handed to the extractor"
         end
       end
     end
   end
 
-  test "skips extraction entirely while the breaker is already open" do
+  test "skips extraction entirely while the outage is already active" do
     existing = create(:post, :media_processed)
     raw_post = build(:apify_image_post, short_code: existing.shortcode)
-    breaker = GeminiBreaker.new
-    5.times { breaker.record(Extractor::Result.new(status: :failed, error_kind: :whole_service, error: "boom")) }
-    assert breaker.open?
+    outage = GeminiOutage.new
+    5.times { outage.record(Extractor::Result.new(status: :failed, error_kind: :whole_service, error: "boom")) }
+    assert outage.active?
     extract_calls = []
 
     stub_apify_client([ raw_post ]) do
       stub_media_processor do
-        stub_extractor_with(->(_post) { raise "extractor must not run while open" }, extract_calls) do
-          result = AccountPipeline.call(@account, breaker: breaker)
+        stub_extractor_with(->(_post) { raise "extractor must not run while active" }, extract_calls) do
+          result = AccountPipeline.call(@account, outage: outage)
 
           assert result.success?
           assert_empty extract_calls
-          assert existing.reload.media_processed?, "posts wait at media_processed while the breaker is open"
+          assert existing.reload.media_processed?, "posts wait at media_processed while the outage is active"
           assert_equal({}, result.stage_results)
         end
       end
@@ -251,6 +251,30 @@ class AccountPipelineTest < ActiveSupport::TestCase
         result = AccountPipeline.call(@account)
         assert_equal({ "media_processed" => { "failed" => 2 } }, result.stage_results)
       end
+    end
+  end
+
+  test "a dead-lettered post is tallied and never touches Gemini" do
+    existing = create(:post, :media_processed)
+    3.times { create(:extraction, :failed, post: existing, error_kind: "this_post") }
+    raw_post = build(:apify_image_post, short_code: existing.shortcode)
+    gemini_calls = 0
+    original = GeminiClient.method(:extract)
+    GeminiClient.define_singleton_method(:extract) { |**_kwargs| gemini_calls += 1 }
+
+    begin
+      stub_apify_client([ raw_post ]) do
+        stub_media_processor do
+          result = AccountPipeline.call(@account)
+
+          assert result.success?
+          assert_equal({ "extracted" => { "dead_lettered" => 1 } }, result.stage_results)
+          assert_equal 0, gemini_calls, "the dead-letter guard returns before any Gemini call"
+          assert existing.reload.media_processed?
+        end
+      end
+    ensure
+      GeminiClient.define_singleton_method(:extract, original)
     end
   end
 

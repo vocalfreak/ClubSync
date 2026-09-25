@@ -2,11 +2,11 @@ class IngestionRunner
   def self.call
     run = IngestionRun.create!(started_at: Time.current, status: :running)
     HealthPing.start
-    breaker = GeminiBreaker.new
+    outage = GeminiOutage.new
 
     begin
       Account.all.each do |account|
-        result = AccountPipeline.call(account, ingestion_run_id: run.id, breaker: breaker)
+        result = AccountPipeline.call(account, ingestion_run_id: run.id, outage: outage)
 
         if result.success?
           run.accounts_processed += 1
@@ -21,6 +21,14 @@ class IngestionRunner
         run.save!
       end
 
+      dedup = Deduplicator.call(ingestion_run_id: run.id)
+      merge_stage_results!(run, dedup.stage_results)
+      run.unexpected_errors += dedup.unexpected_errors
+      if dedup.note.present?
+        run.notes = [ run.notes, "* Deduplicator: #{dedup.note}" ].compact.join("\n")
+      end
+      run.save!
+
       run.status = :finished
 
     rescue => e
@@ -30,11 +38,21 @@ class IngestionRunner
 
     ensure
       run.finished_at = Time.current
+      record_token_usage(run)
       run.save!
       DiscordNotifier.post_run_summary(run)
-      DiscordNotifier.post_breaker_open if breaker.just_opened?
+      DiscordNotifier.post_gemini_outage if outage.just_started?
+      GeminiQuotaAlert.call
       HealthPing.finish(run.status) unless run.status == "crashed"
     end
+  end
+
+  # Best-effort, never run-fatal: the token line is reporting, and a usage read
+  # failing must not abort the notifier chain.
+  def self.record_token_usage(run)
+    run.token_usage = GeminiUsage.for_run(run)
+  rescue StandardError => e
+    Rails.logger.error("IngestionRunner: failed to record token usage: #{e.class}: #{e.message}")
   end
 
   # Sums one account's per-stage outcome hash into the run's cumulatively.

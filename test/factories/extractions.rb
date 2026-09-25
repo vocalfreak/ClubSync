@@ -3,7 +3,7 @@ FactoryBot.define do
     post
     status { "succeeded" }
     model { "gemini-3.8-flash" }
-    prompt_version { "v0" }
+    prompt_version { "v2" }
     category { "event" }
     category_confidence { 0.9 }
     raw_response { {} }

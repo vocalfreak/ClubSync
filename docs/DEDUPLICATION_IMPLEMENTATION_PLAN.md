@@ -1,145 +1,173 @@
-# ClubSync — Phase 2: Deduplication Plan
+# ClubSync — Deduplication Implementation Plan (Phase 2)
 
-*Last updated: September 21, 2026 (revised after a repo audit — see §0).*
+*Last updated: September 24, 2026 — near-simultaneous series rule (§4.1) and `deduplications.series` (§8) decided after the low/high extraction A/B review (the MIMOS trio and the iem_mmu 17:46 trio both failed dedup on cheap signals alone). `CONTEXT.md` owns the vocabulary; this doc owns the Phase 2 algorithm and schema.*
 
-*Companion to the architecture master plan — implements Phase 2 (dedup) and changes where Phase 3 (extraction) sits in the pipeline. See `MASTER_IMPLEMENTATION_PLAN.md` for full context, and `REPO_STATE.md` for the audited current-state snapshot this revision was checked against.*
+Companion docs: `docs/MASTER_IMPLEMENTATION_PLAN.md` (phasing), `docs/EXTRACTION_IMPLEMENTATION_PLAN.md` (production of the `events` rows this phase groups), `docs/HEALTH_MONITORING_PLAN.md` (run summary reporting for the new stage). A current-state grounding snapshot lives in `docs/REPO_STATE.md`.
 
-## 0. Revision notes (2026-09-21)
+**Status:** not built. No `DHash` implementation, `images.dhash` never populated, no `deduplications` table, no pairwise-matching code. `event_groups` and `events.event_group_id` do not exist yet.
 
-This plan was originally written by an agent unaware of the actual repo. The corrections and decisions in this revision are the result of an audit against `REPO_STATE.md`. **No implementation has happened yet** — this doc is the spec.
+---
 
-## 1. What changed from the original plan
+## 1. Position in the pipeline
 
-| Decision | Was | Now | Why |
-|---|---|---|---|
-| Pipeline order | `scraped → media_processed → deduped → extracted` | `scraped → media_processed → extracted → deduped` | Dedup needs the LLM-extracted event date to break the "same flyer template, different session" case, and "merge by confidence" needs a confidence score to rank by — which only exists after extraction runs |
-| Caption-similarity model | `gemini-embedding-001` | `gemini-embedding-2` | Newer multimodal embedding model, same free tier (GA April 2026) |
-| Confident dHash match | Auto-merge, no further check | Always also run a caption/date check | Two visually-identical flyer posts (e.g. recurring "Week 3"/"Week 4" sessions) would otherwise get wrongly merged on image similarity alone |
-| Ambiguous match (neither signal confident) | Undefined | Don't merge — show both publicly, flag for manual review | Matches the project's stated preference: a visible duplicate is a minor annoyance; a wrongly-merged pair silently buries a real event |
-| `images.dhash` availability | Assumed "already populated in Phase 1" | **Not populated** — the column exists but nothing writes it. Phase 2 ships a `DHash` service; MediaProcessor populates the column from the resize bytes (see §5) | The audit found `media_processor` writes `Image` rows with `dhash` nil, and a test asserting `assert_nil image.dhash` |
-| Skip-guard consequence of the reorder | Unstated | **`PostLoader`'s "fully processed" skip guard flips from `post.extracted?` to `post.deduped?`** (see §6) | The reorder makes `deduped` the terminal stage; without this, a deduped post would be re-scraped and re-extracted every cycle |
-| `events` table | Assumed to exist (created "in Phase 1") | **Does not exist.** Phase 2 now creates it as a separate pass (§5), and with it resolves the long-open "where does per-field confidence live" item | The audit found no `events` table/model/migration despite the master plan's Phase 1 checkbox |
+Dedup runs *after* extraction: it needs the extracted event fields (`is_event`, `starts_on`) and the per-signal inputs. Stage order is `scraped → media_processed → extracted → deduped`; `deduped` is the terminal stage.
 
-The reorder stays cheap: neither `extracted` nor `deduped` has real logic wired to it yet (both exist as enum values and factory traits only). But "cheap" is not "no-op" — see the `PostLoader` skip-guard change in §6.
+- **Migration (prerequisite):** reorder `posts.stage` so `deduped` (2) moves after `extracted` (3) → `scraped: 0, media_processed: 1, extracted: 2, deduped: 3`. Until that lands, the enum keeps the shipped order `deduped: 2, extracted: 3` and `extracted?` is still the highest stage. **Data-remap caution:** this is a *value swap*, not a rename — existing rows hold integers, so a naive `UPDATE` would collide (both `deduped` and `extracted` live at values 2 and 3). Remap through a temp value (e.g. `extracted: 3 → 99`, then `deduped: 2 → 3`, then `99 → 2`), or rewrite via a string intermediary, before updating the enum definition.
+- **`PostLoader` guard flip:** skip guard keys off `post.deduped?` (was `post.extracted?`).
+- **Termination is not immunity.** A `deduped` post is "fully processed" — no stage work runs again — but it *stays eligible as a candidate* against newly-arrived same-account posts inside the rolling window. A later run can still merge it and log a `deduplication` for it.
+- `deduped` is reached (and stage advance happens) immediately after disposition, regardless of merge vs. separate: nothing in this phase waits on a human.
 
-## 2. Where this runs
+## 2. Candidate filtering (deterministic, pre-scoring)
 
-Same as media processing: folded into the same per-post pass inside `AccountPipeline`, synchronous, right after each prior stage succeeds. For a given post: `PostLoader` persists the row → `MediaProcessor` runs → extraction runs → dedup runs. No separate job, no queue — matches the existing "no background workers" decision.
+Cheap elimination before any signal work. A **candidate pair** is two posts that pass all of:
 
-**Wiring is deferred until extraction exists.** There is no extraction step in the pipeline today (Phase 3 is unbuilt), and dedup compares posts that are at `extracted` or later. Per the master plan: build and unit-test dedup standalone here against known repost pairs; it won't be wired into the live pipeline until Phase 3 lands. This deferred-wiring stance applies to the *runtime* call from `AccountPipeline`, not to any of the schema/DHash/detection work, which gets built and tested now.
+| Filter | Rule |
+|---|---|
+| **Same account** | `post_a.account == post_b.account`. Cross-account pairs are never candidates (v1 scope decision — cross-account dedup is explicitly deferred) |
+| **Extracted** | both posts at `extracted` or beyond |
+| **Event-derived** | both `is_event == true`. Non-event pairs never pass this filter, so they are never scored and never logged — `deduplications` only ever holds evaluated event pairs |
+| **Position in window** | same-account post separation 0–21 days on `posted_at` — the window deliberately admits both the same-day profile-grid series (several posts, one event, published together) and the spaced announcement→reminder pattern. (Set to 0–21 on 2026-09-24 after the §11 dry run on the real extracted pool showed every labeled same-event pair was same-day; the veto floors + `MAX_DATE_GAP` carry the same-day-different-events separation) |
+| **Not implausibly far in event date** | when *both* `starts_on` are known and disagree outside a sanity bound (well beyond the 3-week posted_at band, e.g. > 30 days apart), the pair is dropped before scoring. Exact value tunable at build time |
 
-One consequence worth naming: within a single `AccountPipeline` run, if an account's fetch returns several posts, an earlier post in that batch may already be sitting at `stage: extracted` by the time a later post in the *same* run reaches dedup — that's fine and expected, it just means the rolling-window comparison set can include same-run siblings, not only posts from prior runs.
+## 3. Signal layer — hand-rolled, zero new gems
 
-## 3. Duplicate-detection algorithm
+Culture-setting precedent: `GeminiClient` already rejected the `google-genai` gem and hand-rolls Net::HTTP REST (`gemini_client.rb:4–8`). The signal layer follows the same grain — every signal is a thin pure-Ruby module, and the only non-trivial external calls reuse what already exists:
 
-For a post that's just finished extraction, compare it against every other post from the **same account** at `stage: extracted` or later, posted within the **last 14–21 days** (the existing rolling-window decision; exact value still open). For each candidate pair:
-
-**Step 1 — dHash Hamming distance** (always, cheap, local; reads `images.dhash`, now populated by `MediaProcessor`)
-
-**Step 2 — caption/date check** (always, cheap, local — even when Step 1 is confident)
-A plain text comparison on the cleaned caption, or a regex/date-parse comparison against the two posts' *extracted* event dates (now available, since extraction runs first). **The date leg requires an `events` row** — it only applies when both posts are events (see §4, non-event handling). The caption leg applies to every post. Not a Gemini call.
-
-**Step 3 — `gemini-embedding-2` caption similarity** (conditional — only when Steps 1 and 2 disagree, or land in the ambiguous band below)
-
-### Decision bands
-
-| Hamming distance (Step 1) | Step 2 agrees? | Verdict |
+| Signal | Computation | Deps |
 |---|---|---|
-| ≤ `T_low` | Yes | **Confident duplicate** → merge |
-| ≤ `T_low` | No (dates/captions clearly differ) | **Ambiguous** → run Step 3 |
-| `T_low`–`T_high` | — | **Ambiguous** → run Step 3 |
-| ≥ `T_high` | — | **Confident non-duplicate** → no action |
+| **dHash (visual)** | `DHashService`: vips → 9×8 grayscale → row/col gradient → 64-bit hash. Hamming of the pair, **min across all image-to-image combinations** of the two posts' `images` rows (a reposted flyer inside a 9-image gallery still matches on one image) | `ruby-vips` (already in the Gemfile, powers `MediaProcessor`) |
+| **Caption lexical overlap** | Jaccard over tokenized captions (downcased, non-alphanumerics stripped) — cheap, catches verbatim reposts. Optional stopword list decided at build time | none (pure Ruby) |
+| **Date agreement (structural)** | `date_distance_days = |A.starts_on − B.starts_on|` | none |
+| **Embedding cosine** | `GeminiClient#embed` — a *sibling* to `extract` hitting `models/<model>:embedContent`, same error taxonomy, injectable-http pattern. Never a fork of `extract` (different response shape: vector vs. candidates). Model comes from a **separate `GEMINI_EMBED_MODEL` env key** — do not reuse `GEMINI_MODEL` (the extraction model). **Tiebreaker only**, gated by §6 | extension of existing `GeminiClient` |
+| **Fuzzy venue / organizer (Levenshtein/Jaro-Winkler)** | **Deferred** — correlates with caption Jaccard (a typo'd venue name moves both signals together), same independence-violation shape as Gap A. Revisit once `deduplications` holds enough real pairs to show whether caption overlap alone actually misses typo/abbreviation cases | (if ever: a real gem, `levenshtein-ffi` / `fuzzy-string-match` — the one signal where a gem is genuinely justified) |
 
-`T_low` and `T_high` are placeholders — set them from the validation task (§8): compare a handful of known repost pairs against a handful of known non-duplicates, find the gap between the two clusters, pick a strict cutoff on the duplicate side given we're erring toward false negatives.
+### 3.1 Per-post caching: compute once, reuse across all pairs
 
-If Step 3 still doesn't produce a confident answer, the pair falls through to **Ambiguous** below rather than being forced into a yes/no.
+The rolling window re-evaluates post X against a new candidate at every run, so anything per-*post* must be computed once and cached — never per-pair-per-run:
 
-## 4. What each verdict actually does
+- **dHash:** written into the existing `images.dhash` column inside `MediaProcessor`'s resize/encode step (no backfill). Hamming is then free on every re-evaluation.
+- **Caption embedding:** a new nullable column on `posts` (the single embedding of the caption, stored as a `jsonb` float array — **no pgvector**: cosine is hand-rolled over the array, keeping the zero-new-extension stance). Computed *lazily* — the first time a post's cheap score lands in the ambiguity band (§6) — then reused for every later pair. Caption is immutable after `extracted`, so the value never needs invalidation. Rationale: without it, every new candidate would re-pay an embedding call for X.
+- **Jaccard and date-distance** are cheap enough to recompute per evaluation; they are not stored per-post.
 
-**Confident duplicate → merge (events only).** Nothing happens to the `Post` rows. The lower-confidence extraction's `events` row gets retired: set its `superseded_by_event_id` to the canonical event, and add its post id to the canonical event's `linked_post_ids`. The public site only ever shows events with `superseded_by_event_id IS NULL`, so the retired row stops appearing without anything being deleted. "Confidence" for picking the canonical one = the extraction's per-field confidence (stored on the `events` row, see §5), weighted toward the fields that matter — date and venue, not category or registration link, per the fields already decided as core. Ties fall back to whichever was scraped first, only as a last resort.
+## 4. Scoring — two-tier, bias toward reject
 
-**Merge never applies to a pair where neither post is an event.** A non-event post has no `events` row to retire and never surfaces publicly, so merging it is meaningless. Such pairs are still detected and logged (§5 `dedup_decisions`) so the eval log stays complete; verdict records `ambiguous`/`rejected` but no merge action is taken.
+Three signals normalize to [0,1]:
 
-**Ambiguous → don't merge.** Both posts' `events` rows stand independently and both show publicly — consistent with preferring a visible duplicate over a wrongly-buried event. The pair gets logged so it sits in a queue for manual merge/reject later; nothing blocks on that review happening.
+- `caption =` Jaccard (raw)
+- `visual = 1 − hash_distance/64`
+- `date = max(0, 1 − date_distance_days/14)` — perfect at 0 days apart, 0 at ≥14 days apart
 
-**Confident non-duplicate → no action.** Both posts continue independently. Not logged individually — see §5.
+**Tier 1 — corroborated vetoes (hard blockers; revised 2026-09-24).** A sub-floor signal only blocks the merge when it is corroborated — with one structural exception:
 
-Every post, regardless of verdict, advances its own `stage` to `deduped` once this check completes. Merge outcome affects the `events` table, not the post's own pipeline progress.
+| Veto | Fires when |
+|---|---|
+| `caption < 0.30` **AND** `hash > 16` | different text **and** clearly different art — `hash > DHASH_STRONG_MATCH_THRESHOLD (16)` — together say "different" → no merge |
+| `date < 0.30` | `starts_on` ≥10 days apart → no merge |
 
-## 5. Data model changes
+Only *defined* signals veto: a channel that is simply *missing* cannot block (see both-null handling).
 
-**Pass A — `events` table (Phase 2, separate pass from dedup).** Resolves the master plan's long-open "where does per-field confidence live" item: per-field confidence is stored on the `events` row itself, which also answers the future "needs review" query (`events WHERE per_field_confidence->'starts_at' < threshold AND superseded_by_event_id IS NULL`).
+The corroboration rule replaces the old lone-channel floors. A single changed channel is *more content*, not evidence of a different event: identical art with a rewritten caption (the iem_mmu trio — hash 0) and an identical caption with barely-distinct art (Paw Fest) are both strong candidates. A lone visual veto could never have fired without the caption already being weak (with matching captions the cheapest blend is ≥ 0.70) — it was the **caption veto firing without visual corroboration** that over-rejected the iem_mmu recap/sign-up bursts, and the corrected rule is symmetric: neither caption nor visual can veto alone. `date` stays lone because the posts' own event dates disagreeing is structural, not stylistic.
 
-```ruby
-create_table :events do |t|
-  t.references :post, null: false, foreign_key: true      # canonical post
-  t.string     :title                                     # extracted title/session name
-  t.datetime   :starts_at                                 # extracted date/time (core field)
-  t.string     :venue                                     # extracted venue (core field)
-  t.jsonb      :per_field_confidence, default: {}         # { "starts_at" => 0.9, "venue" => 0.8, ... }
-  t.jsonb      :linked_post_ids, default: []              # post ids merged into this event
-  t.bigint     :superseded_by_event_id                    # nullable self-FK; set when retired
-  t.timestamps
-end
-add_index  :events, :post_id, unique: true                # one canonical events row per post
-add_foreign_key :events, :events, column: :superseded_by_event_id
+**Tier 2 — weighted blend.** `score = 0.35·caption + 0.30·visual + 0.35·date`, renormalized over the weights of whatever signals are defined (an image-less post drops visual's 0.30 share into the others).
+
+**Disposition (two bands, both automatic — no blocking state):**
+- `score ≥ 0.72` → **merge**
+- everything else → **separate** (logged, no merge)
+
+**Merge threshold 0.72 is asymmetric — biased toward reject.** Example: identical flyer + same date + 50% caption overlap = 0.30 + 0.35 + 0.175·… ≈ 0.86 → merge; three middling 0.5s = 0.5 → separate. All numbers (weights, floors, threshold) are hand-set starting values, explicitly untuned, plastic until `deduplications` has real pairs to tune against.
+
+### 4.1 Near-simultaneous series — timing overrides everything (decided 2026-09-24, window restored to 30 on 2026-09-25)
+
+A candidate pair whose two posts were published within `SERIES_WINDOW_MINUTES = 10` of each other on `posted_at`, and that is **not date-conflicting**, merges outright — no signal scoring, no embedding, no vetoes. Date-conflicting means both `starts_on` known *and* different (that is the scalability guard: a genuinely different event announced in the same hour stays separate, which is what keeps this rule sane when the account list grows beyond MMU clubs). One or both dates unknown → still merges.
+
+Why the bypass exists and what the numbers settled (evidence from the 2026-09-24 low/high A/B review):
+- **The MIMOS trio** (`Dc0xHdvzrOy`/`Dc0xPgNTJaI`/`Dc0xZzTzRDJ`, ieeemmusb, 12:03/12:04/12:05) was weak on *every* cheap channel (hash 21–33 — each promo is distinct art; captions 0.14–0.22) with only the date channel strong, so even the corroborated veto keeps it separate; only timing catches it. Two of its three pairs have a nil `starts_on`, so the whole trio is unreachable by any "unknown date → don't merge" variant: nil dates mean the pair's complete-link component never forms. Its 1–2 min spacing merges well inside the 30-minute window.
+- **The iem_mmu trio** (`DcboawMk4jJ`/`DcbohtoE9LB`/`DcbonV0E8pu`, 17:46/17:47/17:48) is **not** a series case — it is the corroborated veto's normal result. `hash_distance 0` (min-over-pairs Hamming is order-robust, so flipped carousel order is irrelevant) + `date_gap 0` + `caption_jaccard 0.10–0.18`: the old lone caption veto over-rejected it; under corroboration (hash 0 ≤ 16 = the art agrees) the pair lands in the ambiguity band (cheap 0.685–0.712) where the embedding tiebreaker arbitrates, so the series rule never needs to rescue it.
+
+Real promo bursts are 1–2 min apart, so **30 minutes is deliberate headroom** (the review's original 30 was briefly tightened to 10 on 2026-09-24, then restored on 2026-09-25 so it stays comfortably above the observed bursts). The rule only fires for pairs that already survived the candidate prefilter (§2: same account, both `is_event`, 0–21 days) — it can never link cross-account or non-event posts. Series decisions are tagged `series: true` on `deduplications` (§8) with unscored `NULL` signal columns, and **complete-link clustering still applies** to them (a same-hour cluster whose members pairwise conflict still fragments).
+
+## 5. Embedding tiebreaker (gated, signal-gathering — not a third band)
+
+`gemini-embedding-2` cosine is **only** computed for pairs whose cheap blend lands in the ambiguity band
+
+```
+score ∈ [0.55, 0.72)
 ```
 
-(Draft column set — the field list beyond `starts_at`/`venue` is Phase 3's extraction output surface; §4's canonical-pick weighting only relies on `starts_at` + `venue` + `per_field_confidence` + `linked_post_ids` + `superseded_by_event_id`.)
+Then re-score replacing the caption channel wholesale: `score = 0.35·cosine + 0.30·visual + 0.35·date` (embedding is a strictly better caption-similarity estimator; when the cheap signals fight, the expensive one arbitrates). Re-apply the same corroborated vetoes (§4 — the raw caption/hash pair still governs them) and the same 0.72 threshold.
 
-**Pass B — enum reorder + `dedup_decisions` (Phase 2, separate pass).**
+Pairs clearly in the separate band or clearly in the merge band never pay the embedding call. `embedding_cosine` starts as `NULL` in `deduplications` and is only ever written by this gate.
 
-- `posts.stage` enum reorder to `scraped → media_processed → extracted → deduped`. No new/renamed values; just swaps integer slots (`extracted` 2↔`deduped` 3). No rows exist at either stage today, so no data rewrite is needed — but the migration should still defensively remap `2`→`3`/`3`→`2` in case any test/prod row is ever at those values.
-- New `dedup_decisions` table — one row per *pair* actually evaluated. Columns: `post_a_id`, `post_b_id` (FKs; **unique index on the ordered pair**), `dhash_distance`, `caption_check_result` (agree/disagree), `embedding_similarity` (nullable — only populated when Step 3 ran), `verdict` (`merged`/`ambiguous`/`rejected`), `created_at`, `resolved_at` (nullable — set when a human resolves an ambiguous pair).
+## 6. Clustering — complete-link
 
-**Upsert, not append.** Re-evaluating the same pair updates the existing row in place (`ON CONFLICT (post_a_id, post_b_id) DO UPDATE` of the computed columns) and **never overwrites `resolved_at`** once set. In the normal flow a pair is evaluated only once anyway (the §6 skip guard prevents re-runs); the upsert is a safety net for the pre-Phase-3 window and for posts that crash between extraction and dedup.
+A multi-slot group (the "N days left" → announcement → registration series) is formed by **complete-link**: every pair inside the group must individually have crossed the merge threshold. Single-link is rejected — it lets A≈B≈C drift chain (B bridges A and C without A/C being the same event). Same-account windows are small enough that C(n,2) per group is affordable. A post with no matches is a group of one.
 
-This one table does double duty: it's the review queue (`WHERE verdict = 'ambiguous' AND resolved_at IS NULL`) *and* the evaluation log for checking dedup performance over time — the borderline-distance rows are exactly what you'd sample when spot-checking. No separate table needed for either purpose.
+## 7. Disposition: `event_groups`, canonical event, nothing deleted
 
-## 6. Pipeline consequence the reorder forces
+- Every merge unions the posts into one `event_groups` row; both posts' `events` rows get the shared `event_group_id`.
+- `event_groups` is deliberately a bare shell: `id`, `created_at`, `updated_at` — all group structure lives on the members' `events.event_group_id`. No `title`/`venue` columns; the public card renders the canonical member's `events` row instead of duplicating fields. A post with no matches is a group of one (the pass creates its group row too), so every `events` row always has an `event_group_id`.
+- **Canonical event** — the group member the public site's card shows — is the `events` row whose post has the **longest caption** (the registration-style post with the most detail). One simple tiebreak, wholesale: not a per-field cherry-pick, not a confidence vote.
+- **Nothing is terminally deleted.** The losing post and its `events` row persist untouched; the group's members stay linked by the shared `event_group_id`. Image galleries pool across group members via `post_id`.
+- Changing a threshold later means clearing `event_group_id`, deleting groups, and recomputing — no post state to migrate.
 
-`PostLoader` currently skips any post that is `post.extracted?` — "fully processed, never touch again" (`app/services/post_loader.rb`, skip branch). After the reorder the terminal stage is **`deduped`**, so:
+## 8. `deduplications` — the audit trail, nothing more
 
-- `PostLoader`'s skip guard flips to `post.deduped?`.
-- The two `post_loader_test.rb` skip tests referencing `:extracted` update accordingly (still covered by the `:deduped` factory trait).
-- A post at `extracted` (e.g. crashed before dedup) is *not* skipped — it's re-scraped, re-extracted idempotently, and dedup finally completes.
+One evaluated **pairwise comparison** per row: a pair-score audit log, never the merge mechanism, never a review gate — every pair is acted on automatically the moment it's scored. Corrective review after publication is Phase 5, not a pipeline dependency.
 
-This is why the "cheap reorder" in §1 is a migration on ordering *plus* one guard change, not a no-op.
+```ruby
+create_table :deduplications do |t|
+  t.bigint   :post_a_id, null: false    # FK posts; invariant post_a_id < post_b_id
+  t.bigint   :post_b_id, null: false
+  t.string   :account                   # denormalized for admin reads (posts.account is a plain string)
+  t.bigint   :ingestion_run_id, null: false  # FK — the run of the latest evaluation
+  t.integer  :hash_distance             # visual: min Hamming; null = no image pair
+  t.integer  :date_distance_days        # null = either side's starts_on unknown
+  t.float    :caption_jaccard
+  t.float    :embedding_cosine          # null = never computed (ambiguity-gate only)
+  t.float    :weighted_score, null: nil  # null = series merge (never scored)
+  t.string   :outcome, null: false      # "merged" | "separate"
+  t.boolean  :series                    # true = merged via §4.1 (near-simultaneous series); null elsewhere
+  t.datetime :decided_at, null: false
+  t.timestamps
+  # unique index on [post_a_id, post_b_id] = the upsert key
+end
+```
 
-## 7. dHash mechanics
+- **Upserted** on `(post_a_id, post_b_id)`: the latest evaluation overwrites signals/score/outcome/`ingestion_run_id`/`decided_at`. One row per pair, latest evaluation wins — the rolling-window re-open means a pair can be re-scored when a better third post arrives.
+- `series = true` is a reason tag on §4.1 merges, not an admission into the window — a series pair was already a candidate (§2) before the rule bypassed its scoring. Its signal columns *and* `weighted_score` stay `NULL` (no scoring ran), which is itself the audit signal that the series rule fired.
+- Raw vectors are **not** stored here (3000+ floats buy nothing the scalars don't already give the audit); the vector lives transitively — caption → `posts` embedding, image → `images.dhash`.
+- `"separate"` is logged for every evaluated pair that doesn't merge, exactly like `"merged"` — the logging is per-pair, not per-outcome.
 
-- New pure service, `DHash` (`bytes → hex digest string`), unit-tested standalone against known repost pairs per the master plan's Phase 2 validation item.
-- **Called from `MediaProcessor` at the resize/encode step**, hashing the resized WebP bytes already in memory — no B2 retrieval, no extra I/O, no backfill. `MediaProcessor` writes the value into the `Image` row it already creates.
-- **No backfill for pre-existing rows.** The handful of media_processed posts from the September dry run keep `dhash` nil and are ignored (dev data; production starts fresh on the E5440). A nil hash simply excludes a post from the comparison set.
-- Current order of operations in `MediaProcessor` (fetch → resize → encode → upload → insert `images` row) adds one hashing step before the insert; the atomic one-transaction-per-post semantics are unchanged.
+## 9. Open items — resolved this session
 
-## 8. What Phase 5's admin surface needs, as a result
+| Open item | Resolution |
+|---|---|
+| Single-link vs. complete-link | **Complete-link** (§6) |
+| Both-null-dated pair handling | The `date` channel is *undefined* when either `starts_on` is unknown — it contributes no credit, no penalty, and never vetoes. Both-null pairs can still merge on strong caption+visual (the classic "same flyer, no date in either caption" repost). "Too strict" is avoided by construction, since strictness only comes from defined channels |
+| Cross-account reposts | Never candidates (v1 scope; explicitly deferred) |
+| Same-day promo trios don't merge (MIMOS / iem 17:46 misses) | **Near-simultaneous series rule** (§4.1, decided 2026-09-24, window restored to 30 on 2026-09-25): ≤30-min publication gap + not date-conflicting → merge regardless of vetoes, tagged `deduplications.series`; complemented by the **corroborated veto** (2026-09-24) that stops the caption channel vetoing alone, so the iem trio's identical-art bursts resolve through the ambiguity band instead of an over-eager veto |
 
-The admin/review surface (already on the roadmap) now has a second job beyond "posts stuck in `last_error`": a queue of ambiguous pairs from `dedup_decisions` (`verdict = 'ambiguous' AND resolved_at IS NULL`) waiting on a manual merge/reject call — resolution sets `resolved_at`. Worth a one-line addition to that phase's checklist rather than a new phase. The "update the public events query to filter `superseded_by_event_id IS NULL`" step belongs to Phase 5 too (no public query exists yet).
+## 10. Wiring (end of run) and the run summary
 
-## 9. Explicitly deferred / open
+- Dedup is a **run-level pass at end of run**: after all accounts have been processed (so a run's extractions all exist), evaluate windowed candidate pairs per account, apply disposition, then write the run's `deduped` tallies into `ingestion_runs.stage_results` under `"deduped"` (e.g. `{"deduped": {"succeeded": 12, "merged": 4, "failed": 1}}`), which the existing Discord summary machinery renders like any other stage.
+- `deduped` is a normal `stage_results` key: posts that failed at or before `extracted` are not tallied there; a post already `deduped` isn't re-tallied, but new pairs *against* it per §1 can still move it within a group and log a fresh `deduplication`.
 
-- **`T_low` / `T_high` exact values** — set via the known-repost-pairs validation, not guessed here.
-- **Confidence-weighting formula for canonical pick** — the date/venue-weighted average above is a first cut; revisit once real confidence distributions exist from Phase 3.
-- **`events` column set beyond the core fields** — final shape is Phase 3's extraction output surface; Phase 2 creates the table per §5.
-- **Cross-account dedup** — still out of v1 scope, unchanged.
-- **What "manually resolve" looks like in the admin UI** (a merge button, a reject button) — implementation detail for Phase 5.
-- **Whether `gemini-embedding-2` is used for caption-only or image+caption vectors** — this plan uses it for caption similarity (Step 3); image similarity is already covered by dHash. Embedding spaces of `001` vs `2` are incompatible, so don't mix (irrelevant today — nothing is embedded yet).
+### 10.1 Failure semantics — hermetic, digestible, attributable
 
-## 10. Implementation checklist
+Dedup is not Gemini or Apify: nothing downstream depends on it keeping the pipeline moving, so a dedup failure is **never a run failure**.
 
-- [ ] Migration (Pass B): reorder `posts.stage` enum to `scraped → media_processed → extracted → deduped` (defensive value remap included)
-- [ ] `PostLoader`: flip skip guard `extracted?` → `deduped?`; update the two skip tests
-- [ ] Migration (Pass A): create `events` table per §5 (fields, `per_field_confidence`, `linked_post_ids`, `superseded_by_event_id` self-FK, unique `post_id`)
-- [ ] Migration (Pass B): create `dedup_decisions` table with unique index on `(post_a_id, post_b_id)`
-- [ ] Implement the pure `DHash` service (grayscale + resize via `ruby-vips`, bit comparison, Hamming distance)
-- [ ] Wire `DHash` into `MediaProcessor`'s resize/encode step so `images.dhash` is populated on first pass (no backfill)
-- [ ] Validate `DHash` against a handful of known repost pairs before trusting it
-- [ ] Implement the local caption/date check (no API call); date leg applies only when both posts have `events` rows
-- [ ] Wire `gemini-embedding-2` as the Step 3 tiebreaker, gated to only fire on disagreement/ambiguous-band cases
-- [ ] Validate `T_low`/`T_high` against known repost pairs and known non-duplicates
-- [ ] Merge logic: retire the lower-confidence `events` row, relink post id, set `superseded_by_event_id` — **events pairs only**; non-event pairs are detect+log only
-- [ ] Log every rolling-window comparison to `dedup_decisions` (one row per pair, upsert, preserve `resolved_at`)
-- [ ] Wire dedup into `AccountPipeline`, immediately after extraction succeeds, same pattern as media processing — **deferred until Phase 3 extraction is live**
-- [ ] Update `posts.stage` to `deduped` on completion, regardless of verdict
-- [ ] Phase 5: public events query filters `superseded_by_event_id IS NULL`; admin queue lists unresolved ambiguous pairs
+- **Pass-level (hermetic):** the whole pass is wrapped in its own rescue that logs the exception (truncated backtrace into the run's `notes`), counts any unanticipated raise into `unexpected_errors`, records what it can, and returns. It never propagates into `IngestionRunner`, so it can never set run status `crashed`, never `/fail` healthchecks.io, and never posts to `#clubsync-alerts`. No outage tracker for dedup.
+- **Pair-level atomicity + attribution:** each pair's disposition (group writes + `deduplications` upsert + members' `stage` advance) is one transaction. A pair whose transaction errors marks **both its posts** with `last_error` / `stage_failed_at` (message naming the deduped stage) while `stage` stays at `extracted`, so the stalled-post admin view can point at dedup specifically — same shape as a media/extracted failure. The pair is tallied under `stage_results["deduped"]["failed"]` and silently re-evaluated next run (passive retry, no new machinery). Posts the pass never reached are not marked — only pairs that actually errored.
+- **Embedding hiccup in the ambiguity band:** a transient whole-service failure on an embed call skips the tiebreaker — the pair is decided on the cheap score alone and still logged to `deduplications` with `embedding_cosine` NULL; the embed error is logged, not counted as a pair failure (the tiebreaker is getter-only, never the decider).
+
+## 11. Validation before trusting it in the live pipeline
+
+- Validate dHash alone against the labeled ground truth recorded in `docs/EXTRACTION_IMPLEMENTATION_PLAN.md` §13 (LUNGS pair, Studio Sessions triple, MIMOS pair, and the Misi Bekal same-day-different-events non-pair) plus the `MEASURE` query (`GROUP BY account, starts_on HAVING count(*) > 1`) on real dev data — before any threshold is relied on.
+- Build and unit-test the whole module standalone against those known pairs; wire into the live pipeline only after Phase 3 lands (the note in MASTER §Phase 2).
+
+## 12. Deferred (not this phase)
+
+- **Fuzzy venue/organizer match (Levenshtein/Jaro-Winkler)** — see §3. Revisit when `deduplications` has enough real pairs to show caption overlap alone is missing typo/abbreviation cases.
+- **OCR** — speculative complexity for a failure mode not yet confirmed. If real misreads later: one-off A/B run OCR on failing images, paste raw text into the extraction prompt as extra context, check with `clubsync:extraction_eval` before committing.
+- **Cross-account dedup** — v1 scope line, never a candidate pair.
+- **Recurring / annual events** — a new edition has a new date and new artwork; not a dedup case (extraction plan §13).
