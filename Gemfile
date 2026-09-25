@@ -1,7 +1,7 @@
 source "https://rubygems.org"
 
 # Bundle edge Rails instead: gem "rails", github: "rails/rails", branch: "main"
-gem "rails", "~> 8.0.2"
+gem "rails", "~> 8.1.3"
 # ActiveSupport::JSON.encode passes quirks_mode: to JSON.generate, which
 # json 3.x (bundled with Ruby 3.4) removed — pin to 2.x so jsonb columns work.
 gem "json", "~> 2.12"
