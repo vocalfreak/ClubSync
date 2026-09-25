@@ -19,6 +19,8 @@ RUN bundle install --jobs 4 --retry 3
 
 COPY . .
 
+RUN RAILS_ENV=production SECRET_KEY_BASE_DUMMY=1 bin/rails assets:precompile
+
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
