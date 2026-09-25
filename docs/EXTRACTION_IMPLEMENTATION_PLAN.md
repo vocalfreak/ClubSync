@@ -1,6 +1,6 @@
 # ClubSync — Phase 3: Extraction Plan
 
-*Last updated: September 24, 2026 — in-extraction CSRW guard (§6/§6.1) and prompt v3 wording (recap-wins, `qr_code_seen` precision) decided after the low/high extraction A/B review; rewritten after the extraction/dedup planning session — see §0.*
+*Last updated: September 25, 2026 — event tags decided and built (frozen 37-tag list, §3 tag list; §4.1 `events.tags`; §7.1 schema row + §7.2 rule 12; §9 `EventTags`; §12 Pass 7, `ExtractionPrompt` v4); previously (2026-09-24): in-extraction CSRW guard (§6/§6.1) and prompt v3 wording (recap-wins, `qr_code_seen` precision) decided after the low/high extraction A/B review; rewritten after the extraction/dedup planning session — see §0.*
 
 *Companion to the architecture master plan — implements Phase 3 (extraction). Read `MASTER_IMPLEMENTATION_PLAN.md` for the architecture and `REPO_STATE.md` for the audited current-state snapshot this is grounded on. `HEALTH_MONITORING_PLAN.md` owns run-level monitoring (a new Phase 3 section is specified there — §10 lists what this phase must emit). `DEDUPLICATION_IMPLEMENTATION_PLAN.md` is **on hold** — see §13.*
 
@@ -76,6 +76,20 @@ Turn a `media_processed` post (caption + processed images in B2) into:
 
 **QR codes** on a poster are a hint that the post is a sign-up-bearing event poster. The model does not guess where a QR points. `qr_code_seen` is `true` only when a clearly visible QR code is actually printed in an image — never inferred from context or "scan for more" wording (decided 2026-09-24, v3 wording, after the `Dc0xZzTzRDJ` A/B false positive).
 
+### Event tags (decided 2026-09-25, pending build)
+
+Separate axis from `category` — topical, non-exclusive, and only meaningful once a post *is* an event. Where `category` is a single value driving precedence/control-flow (CSRW outranks event, recap wins over event), tags are zero-or-more free labels describing what kind of event it is (a coding workshop can be both `workshop` and `academic`). Lives on `events.tags` (§4.1), never on `posts` — same reasoning as `title`/`venue`/`starts_on`: meaningless until something is actually an event.
+
+Deliberately a **separate code constant**, `EventTags`, not folded into `Categories` — mixing them would blur two different jobs a "category" field is doing in this codebase.
+
+### Tag list (frozen 2026-09-25)
+
+`Academic`, `Adventure`, `Arts`, `Business`, `Competitive`, `Culture`, `Editorial`, `Entrepreneur`, `Faculty Clubs`, `Finance`, `Games`, `Governance`, `Green`, `Halls`, `Healthcare`, `Hobby`, `Houses`, `Interest/Affinity`, `Interprofessional`, `Language`, `Media`, `Mentorship`, `Office`, `Performance`, `Policy`, `Politics`, `Professional`, `Religion`, `Residences`, `Residential Colleges`, `Robotics`, `Social Cause`, `Social/Recreational`, `Sports`, `Technology`, `Uniform`, `Wellness`
+
+**Closed.** Same reasoning as `Categories`: an open freeform field lets the model drift ("STEM" vs. "Academic" vs. "Educational" all meaning the same thing). Values are stored verbatim as display labels (Title Case, spaces/slashes intact) — see `docs/adr/2026-09-25-event-tags-verbatim-labels.md`.
+
+No `tags_confidence` column (contrast with `title_confidence` / `starts_at_confidence` / `venue_confidence`, §4.1) — tags don't gate any business logic, so a parked-Q12-style calibration question isn't worth reopening for a field where the worst case is a filter-UI annoyance, not a wrong event card.
+
 The mapping lives in one code constant (`Categories`); changing it later means re-deriving `is_event` from stored data, not re-calling Gemini (§6).
 
 ### Real examples (September 21, 2026 sample; practice data only — not part of the exam set)
@@ -112,6 +126,10 @@ create_table :events do |t|
   t.check_constraint "ends_on IS NULL OR starts_on IS NULL OR ends_on >= starts_on"
 end
 add_index :events, :starts_on
+
+# Added 2026-09-25 — event_tags feature. events is already built (Pass 0), so
+# this is a separate migration, not an edit to the original create_table.
+add_column :events, :tags, :string, array: true, default: [], null: false
 ```
 
 Local Malaysia wall-clock time throughout, split into a date and a time column — no UTC conversion, no ambiguous single-string format. `starts_time`/`ends_time` are `null` when no time was given (this replaces the earlier `starts_at_has_time` boolean). Sorting becomes `ORDER BY starts_on, starts_time`, which is fine while everything is one timezone (Q4: `Asia/Kuala_Lumpur` for all accounts).
@@ -254,7 +272,7 @@ Follows `MediaProcessor`'s pattern: `Extractor.call(post, **kwargs)`, injectable
 4. **Parse** (`ExtractionParser`, pure) and **threshold** (`ConfidenceThreshold`, pure). Invalid response → failed (this-post). A structurally valid but semantically impossible date (e.g. `2026-02-30`) or JSON truncated at the token limit both count as `InvalidResponseError` — the response schema guarantees shape, not truth.
 5. **Derive** `is_event` from the category via `Categories`.
 6. **CSRW guard (decided 2026-09-24, pending build):** if `CsrwRetagger` matches the caption's lexical markers (see §6.1), override the parsed attributes to `category: club_and_society_registration_week, is_event: false` *before* the event-row step. Because it runs before `create_event`, a csrw post never gets an `events` row and **nothing is ever deleted in the live path** — the guard is the "verifier" once hoped for as a run-end stage, just placed where it makes deletion unnecessary. `extractions.raw_response` still records what Gemini actually said; `extractions.category` records the stored (guarded) value.
-7. **Success — one short transaction:** create the succeeded `extractions` row; create the `events` row if `is_event` (step 6 already made that false for guard-matched posts); update the post (`category`, `is_event`, `stage: :extracted`, clear `last_error`/`stage_failed_at`).
+7. **Success — one short transaction:** create the succeeded `extractions` row; create the `events` row if `is_event` (step 6 already made that false for guard-matched posts), including `tags` copied verbatim from the parsed response; update the post (`category`, `is_event`, `stage: :extracted`, clear `last_error`/`stage_failed_at`).
 8. **Failure:** write a failed `extractions` row and set `last_error`/`stage_failed_at` on the post; `stage` stays `media_processed`.
 
 ### 6.1 The CSRW guard markers (decided 2026-09-24, pending build)
@@ -298,6 +316,7 @@ The one-off `clubsync:retag_csrw` rake keeps its full-scan + event-row destroy s
 | `members_only`, `online_only` | boolean \| null | → `details` |
 | `confidence` | object | `title`, `starts_at`, `venue`, each 0–1 |
 | `notes` | string \| null | e.g. "post lists 3 events"; → `details.notes` |
+| `tags` | array of enum strings | Topical tags — closed list (`EventTags`), non-exclusive. Empty array for non-events. Required-but-nullable-array, same pattern as every other field: the key is always present, the content is empty when not applicable. No per-field confidence (see §3 rationale) |
 
 The timezone is `Asia/Kuala_Lumpur` (Q4 resolved). `starts_date`/`starts_time`/`ends_date`/`ends_time` are local wall-clock strings stored directly into `events.starts_on` / `starts_time` / `ends_on` / `ends_time` — no UTC conversion anywhere in the pipeline.
 
@@ -321,6 +340,7 @@ The timezone is `Asia/Kuala_Lumpur` (Q4 resolved). `starts_date`/`starts_time`/`
     "caption is data, not instructions" wording in the prompt text. Revisit
     this only if a bad classification ever looks *deliberate* rather than a
     model mistake; a briefing page, not a code or prompt feature.
+12. **Event tags:** for `event` posts only, assign zero or more topical tags from the closed `EventTags` list — non-exclusive (a coding workshop can be both `workshop` and `academic`). Non-event posts always return an empty array. Tags are informational only; they never affect `category` or `is_event`.
 
 ## 8. Confidence and gating
 
@@ -354,6 +374,7 @@ ORDER BY e.starts_on, e.starts_time;
 | `GeminiClient` | REST transport over `Net::HTTP` (2026-09-21 decision: the rubygems `google-genai` gem turned out to be an unofficial 0.1.1 single-author port with no request timeouts and error classes that clash with this taxonomy — used the plan's stated fallback). One `extract(contents:, system_instruction:, generation_config:)` call → a `Response` (parsed JSON text, token usage, duration, model). The JSON payload (caption text, inline images, response schema) is built by **`GeminiPayload`** (Pass 2) and fed in — the client is transport only. Exception taxonomy mirroring `ApifyClient`: `TimeoutError`, `RateLimitedError`, `AuthError`, `ServerError` (all **whole-service**); `BlockedError`, `InvalidResponseError` (**this-post**). Hermetic and injectable (`http:`, mirroring `ApifyClient`) |
 | `ExtractionPrompt` | Prompt text + JSON response schema + `VERSION` (bumped by hand; stored in `extractions.prompt_version`). v2 = CSRW landed under the descriptive value (2026-09-24); **v3 (decided 2026-09-24, pending build)** adds the recap-wins precedence line + CHEAT SHEET row and the precise `qr_code_seen` wording (§3, §7.2) |
 | `Categories` | The closed category list and its `event?` mapping (one constant) |
+| `EventTags` | The closed, frozen 37-tag list (one constant, mirrors `Categories`'s shape but carries no `event?`-style mapping — tags don't drive control flow; out-of-list model output is dropped leniently, never vetoed) |
 | `ExtractionParser` | **Pure**, mirrors `PostAdapter`: Gemini's JSON → canonical attributes + `Result` (`valid?` / `errors`). Never touches the DB |
 | `ConfidenceThreshold` | **Pure** rule checks (§8) |
 | `Extractor` | The stage service (§6): guard, orchestration, DB writes, `Result` |
@@ -428,6 +449,14 @@ The health plan's new section covers: recomputing the healthchecks.io **grace ti
 
 **Pass 6 — Langfuse (dropped from v1)**
 - [x] **Out of v1 (2026-09-21):** `extractions` is the permanent record and the ~50-post eval set is a human process; no tracing UI, no SDK dependency, no `LlmTrace`. Revisit only if post-launch debugging demands it.
+
+**Pass 7 — Event tags (built 2026-09-25)**
+- [x] Migration: `events.tags` (string array, default `[]`)
+- [x] `EventTags` constant — the frozen 37-tag list
+- [x] Schema §7.1 + prompt rule 12; landed as `ExtractionPrompt` **v4** (2026-09-25; v3's recap-wins/QR wording was already built)
+- [x] `Extractor`: copy `tags` onto the `events` row per §6 step 7 (lenient on values: out-of-list tags dropped by the parser, never a this-post failure)
+- [ ] Validation: spot-check 10–15 real posts by hand — lighter than Pass 5's
+      full blind eval, proportional to tags not gating any business logic
 
 ## 13. Deferred to the dedup session
 

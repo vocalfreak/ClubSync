@@ -12,10 +12,12 @@
 # DdI3NLXHeYN), and qr_code_seen is true only when a clearly visible QR code is
 # actually printed in an image, never inferred from caption wording — fixes
 # Dc0xZzTzRDJ's false positive.
+# v4 (2026-09-25): event tags — the closed EventTags list (§3), stored on
+# `events.tags`, non-exclusive, empty array for non-events; informational only.
 #
 # Pure: builds strings and hashes, never touches the DB or network.
 class ExtractionPrompt
-  VERSION = "v3".freeze
+  VERSION = "v4".freeze
   TIMEZONE = "Asia/Kuala_Lumpur".freeze
   SEED = 12345
   # 3.5-flash runs thinking on by default (medium). "low" trims the billed
@@ -28,6 +30,11 @@ class ExtractionPrompt
   NUMBER_SCHEMA = { "type" => "number" }.freeze
   NULLABLE_STRING_SCHEMA = { "type" => "string", "nullable" => true }.freeze
   NULLABLE_BOOLEAN_SCHEMA = { "type" => "boolean", "nullable" => true }.freeze
+
+  TAGS_SCHEMA = {
+    "type" => "array",
+    "items" => { "type" => "string", "enum" => EventTags.all }
+  }.freeze
 
   CHECKS_SCHEMA = {
     "type" => "object",
@@ -55,7 +62,7 @@ class ExtractionPrompt
   SCHEMA_PROPERTY_ORDER = %w[
     checks category category_confidence title starts_date starts_time ends_date
     ends_time venue registration_url registration_via members_only online_only
-    confidence notes
+    confidence notes tags
   ].freeze
 
   SCHEMA = {
@@ -75,7 +82,8 @@ class ExtractionPrompt
       "members_only" => NULLABLE_BOOLEAN_SCHEMA,
       "online_only" => NULLABLE_BOOLEAN_SCHEMA,
       "confidence" => CONFIDENCE_SCHEMA,
-      "notes" => NULLABLE_STRING_SCHEMA
+      "notes" => NULLABLE_STRING_SCHEMA,
+      "tags" => TAGS_SCHEMA
     },
     "required" => SCHEMA_PROPERTY_ORDER,
     "propertyOrdering" => SCHEMA_PROPERTY_ORDER
@@ -103,6 +111,8 @@ class ExtractionPrompt
       "Huge thanks to everyone who came to our charity night last Friday!" => recap
 
     SIGN-UPS are an attribute of an event, never a category and never the event's date. A sign-up or booth window mentioned inside another event's post is not that event's date.
+
+    EVENT TAGS: for event posts only, assign zero or more topical tags from the closed list (#{EventTags.all.join(", ")}). Non-exclusive — a coding workshop can be both "Workshop" and "Academic". Non-event posts always return an empty array. Tags are informational only; they never affect category or is_event.
 
     DATES: accept only Gregorian dates, in any language of the caption: written month names or day-first numerics ("21/9/2026" = 21 September 2026). Hijri, lunar, or any other calendar → null. Never invent a date. A month/day without a year ("13 Feb") or a day-name reference ("tomorrow", "this Saturday") resolves to the NEAREST occurrence at-or-after the post's date — that is often the announcement's only date. Countdown phrasing ("2 days left", "3 days to go") never produces a date — that is the signature of a "reminder" follow-up and gets no event date. If a date could mean a sign-up deadline → null.
 

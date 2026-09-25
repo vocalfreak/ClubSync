@@ -104,6 +104,7 @@ class ExtractorTest < ActiveSupport::TestCase
       "ends_time" => "14:00",
       "members_only" => true,
       "registration_via" => "qr",
+      "tags" => [ "Academic", "Sports" ],
       "confidence" => { "title" => 0.8, "starts_at" => 0.9, "venue" => 0.8 }
     )
 
@@ -119,7 +120,7 @@ class ExtractorTest < ActiveSupport::TestCase
 
     extraction = Extraction.last
     assert_equal "succeeded", extraction.status
-    assert_equal "v3", extraction.prompt_version
+    assert_equal "v4", extraction.prompt_version
     assert_equal "event", extraction.category
     assert_equal payload, extraction[:raw_response]
     assert_equal 1, extraction.image_count
@@ -130,6 +131,7 @@ class ExtractorTest < ActiveSupport::TestCase
     event = Event.last
     assert_equal post.id, event.post_id
     assert_equal "Rumah Amanah, Hulu Langat", event.venue
+    assert_equal [ "Academic", "Sports" ], event.tags
     assert_equal Date.new(2026, 5, 2), event.starts_on
     assert_equal "07:30", event.starts_time.strftime("%H:%M")
     assert_equal Date.new(2026, 5, 2), event.ends_on
@@ -200,6 +202,18 @@ class ExtractorTest < ActiveSupport::TestCase
     assert_equal "event", post.reload.category
     assert post.reload.is_event?
     assert_equal 1, Event.count, "a non-csrw post keeps its event row"
+  end
+
+  test "an out-of-list tag from Gemini is dropped, not a parse failure" do
+    post = post_with_images(%w[b2-1])
+    payload = build(:gemini_payload).merge("tags" => [ "Academic", "Bogus Tag" ])
+
+    result = Extractor.call(post, client: FakeClient.new(payload: payload), object_store: FakeObjectStore.new)
+
+    assert result.success?
+    assert post.reload.extracted?
+    assert_equal [ "Academic" ], Event.last.tags, "unknown values never reach the stored row"
+    assert_equal "v4", Extraction.last.prompt_version
   end
 
   test "thresholds a placeholder venue before persisting" do

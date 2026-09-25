@@ -35,6 +35,7 @@ FactoryBot.define do
       }
     end
     notes { nil }
+    tags { [] }
 
     trait :event do
     end
@@ -192,7 +193,8 @@ FactoryBot.define do
         "members_only" => members_only,
         "online_only" => online_only,
         "confidence" => confidence,
-        "notes" => notes
+        "notes" => notes,
+        "tags" => tags
       }
     end
   end

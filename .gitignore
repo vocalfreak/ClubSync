@@ -48,3 +48,5 @@ backups/
 
 # apify dataset exports (clubsync replay)
 data/apify_export/
+
+Design_mockups/

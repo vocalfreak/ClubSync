@@ -237,6 +237,7 @@ class Extractor
       venue: attributes[:venue],
       registration_url: attributes[:registration_url],
       details: details_hash(attributes),
+      tags: attributes.fetch(:tags, []),
       title_confidence: confidence[:title] || 0.0,
       starts_at_confidence: confidence[:starts_at] || 0.0,
       venue_confidence: confidence[:venue] || 0.0

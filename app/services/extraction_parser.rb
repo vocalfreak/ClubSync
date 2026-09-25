@@ -26,7 +26,7 @@ class ExtractionParser
   REQUIRED_KEYS = %w[
     checks category category_confidence title starts_date starts_time ends_date
     ends_time venue registration_url registration_via members_only online_only
-    confidence notes
+    confidence notes tags
   ].freeze
 
   DATE_FORMAT = "%Y-%m-%d".freeze
@@ -65,6 +65,7 @@ class ExtractionParser
     @attributes[:online_only] = map_boolean("online_only")
     @attributes[:confidence] = map_confidence
     @attributes[:notes] = map_string("notes")
+    @attributes[:tags] = map_tags
 
     Result.new(attributes: @attributes, errors: @errors, fatal: false)
   end
@@ -153,6 +154,20 @@ class ExtractionParser
     end
 
     value
+  end
+
+  def map_tags
+    value = @raw["tags"]
+    return [] if value.nil?
+
+    unless value.is_a?(Array)
+      @errors << "tags must be an array of strings (got #{value.inspect})"
+      return []
+    end
+
+    # Lenient on values (plan grill 2026-09-25): out-of-list tags are dropped,
+    # never a parse failure — a filter-UI convenience, not a business gate.
+    value.select { |tag| EventTags.include?(tag) }.uniq
   end
 
   def map_confidence

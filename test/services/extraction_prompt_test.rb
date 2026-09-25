@@ -1,8 +1,8 @@
 require "test_helper"
 
 class ExtractionPromptTest < ActiveSupport::TestCase
-  test "the hand-bumped version is v3 (recap-wins + QR precision landed 2026-09-24)" do
-    assert_equal "v3", ExtractionPrompt::VERSION
+  test "the hand-bumped version is v4 (event tags landed 2026-09-25)" do
+    assert_equal "v4", ExtractionPrompt::VERSION
   end
 
   test "generation_config requests JSON with the frozen schema, checks first" do
@@ -18,6 +18,15 @@ class ExtractionPromptTest < ActiveSupport::TestCase
     schema = ExtractionPrompt.generation_config["responseSchema"]
 
     assert_equal Categories.all, schema["properties"]["category"]["enum"]
+  end
+
+  test "v4 ads the closed EventTags enum as the array items of the tags field" do
+    schema = ExtractionPrompt.generation_config["responseSchema"]
+
+    tags = schema["properties"]["tags"]
+    assert_equal "array", tags["type"]
+    assert_equal EventTags.all, tags["items"]["enum"]
+    assert_equal "tags", schema["propertyOrdering"].last
   end
 
   test "every required schema key is declared" do
@@ -38,6 +47,14 @@ class ExtractionPromptTest < ActiveSupport::TestCase
     assert_includes instruction, "restating the past date/venue"
     assert_includes instruction, "Huge thanks to everyone who came to our charity night last Friday!\" => recap"
     assert_includes instruction, "qr_code_seen is true ONLY when a clearly visible QR code is actually printed in one of the images"
+  end
+
+  test "v4 bakes in the EVENT TAGS rule with the closed list" do
+    instruction = ExtractionPrompt::SYSTEM_INSTRUCTION
+    assert_includes instruction, "EVENT TAGS"
+    assert_includes instruction, EventTags.all.join(", ")
+    assert_includes instruction, "Non-event posts always return an empty array"
+    assert_includes instruction, "they never affect category or is_event"
   end
 
   test "user_text embeds the caption and the local posted date" do
@@ -62,7 +79,7 @@ class ExtractionPromptTest < ActiveSupport::TestCase
 
     schema["properties"].each do |key, definition|
       assert_includes definition.keys, "type"
-      assert_includes %w[string number boolean object], definition["type"], "key #{key} has a type"
+      assert_includes %w[string number boolean object array], definition["type"], "key #{key} has a type"
     end
   end
 end

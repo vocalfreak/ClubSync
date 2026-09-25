@@ -112,6 +112,41 @@ class ExtractionParserTest < ActiveSupport::TestCase
     assert result.errors.any? { |error| error.include?("confidence.title") }
   end
 
+  test "parses event tags into the canonical attributes" do
+    payload = build(:gemini_payload).merge("tags" => [ "Academic", "Robotics", "Sports" ])
+
+    result = parse(payload)
+
+    assert result.valid?, result.errors.inspect
+    assert_equal [ "Academic", "Robotics", "Sports" ], result.attributes[:tags]
+  end
+
+  test "drops out-of-list and duplicate tags leniently without failing the parse" do
+    payload = build(:gemini_payload).merge("tags" => [ "Academic", "Bogus Tag", "Academic", "Sports" ])
+
+    result = parse(payload)
+
+    assert result.valid?, "an unknown tag is a filter-UI detail, never a this-post failure"
+    assert_empty result.errors
+    assert_equal [ "Academic", "Sports" ], result.attributes[:tags]
+  end
+
+  test "null and missing tags both resolve to an empty array" do
+    assert_equal [], parse(build(:gemini_payload).merge("tags" => nil)).attributes[:tags]
+    assert_equal [], parse(build(:gemini_payload).merge("tags" => [])).attributes[:tags]
+
+    missing = parse(build(:gemini_payload).except("tags"))
+    refute missing.valid?, "tags is a required schema key, like every other field"
+    assert missing.errors.any? { |error| error.include?("tags") }
+  end
+
+  test "a non-array tags value is a shape error" do
+    result = parse(build(:gemini_payload).merge("tags" => "Academic"))
+
+    refute result.valid?
+    assert result.errors.any? { |error| error.include?("tags") }
+  end
+
   test "fails when a required key is missing" do
     result = parse(build(:gemini_payload).except("notes"))
 
