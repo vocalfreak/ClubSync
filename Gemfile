@@ -36,10 +36,15 @@ gem "ruby-vips"
 # development and testing
 gem "dotenv-rails", groups: [ :development, :test ]
 
-# Use the database-backed adapters for Rails.cache, Active Job, and Action Cable
-gem "solid_cache"
-gem "solid_queue"
-gem "solid_cable"
+# solid_cache, solid_queue and solid_cable are intentionally NOT dependencies.
+# All three engines eagerly load their Record classes on boot, and each one calls
+# connects_to for its own database, so with only a single `production` connection
+# in database.yml the app raised AdapterNotSpecified and could not start at all.
+# Nothing here fragment-caches, enqueues an ActiveJob, or opens an ActionCable
+# subscription, so Rails' built-in defaults are correct for this single-container
+# setup. Add a gem back together with the database.yml connection and the process
+# that serves it -- a database-backed queue also needs a supervisor to run jobs.
+# See docs/DEPLOYMENT_IMPLEMENTATION_PLAN.MD section 2.2.
 
 # Reduces boot times through caching; required in config/boot.rb
 gem "bootsnap", require: false

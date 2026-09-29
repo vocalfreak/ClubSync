@@ -16,13 +16,17 @@ Rails.application.configure do
   config.action_controller.perform_caching = true
 
   # Cache assets for far-future expiry since they are all digest stamped.
+  # public_file_server.enabled is deliberately left at its Rails default of true.
+  # A generated production.rb normally turns it off on the assumption that nginx
+  # or thruster serves /public, but here cloudflared forwards straight to Puma with
+  # nothing in between -- disabling it would 404 every stylesheet and script.
   config.public_file_server.headers = { "cache-control" => "public, max-age=#{1.year.to_i}" }
 
   # Enable serving of images, stylesheets, and JavaScripts from an asset server.
   # config.asset_host = "http://assets.example.com"
 
-  # Store uploaded files on the local file system (see config/storage.yml for options).
-  config.active_storage.service = :local
+  # ActiveStorage is unused (images live in B2 via ObjectStore) and `:local` would
+  # silently write into the container's untracked layer, so the service is left unset.
 
   # Assume all access to the app is happening through a SSL-terminating reverse proxy.
   config.assume_ssl = true
@@ -46,19 +50,19 @@ Rails.application.configure do
   # Don't log any deprecations.
   config.active_support.report_deprecations = false
 
-  # Replace the default in-process memory cache store with a durable alternative.
-  config.cache_store = :solid_cache_store
-
-  # Replace the default in-process and non-durable queuing backend for Active Job.
-  config.active_job.queue_adapter = :solid_queue
-  config.solid_queue.connects_to = { database: { writing: :queue } }
+  # Solid Cache / Queue / Cable are deliberately not configured. Nothing in the app
+  # performs fragment caching, enqueues an ActiveJob, or opens an ActionCable
+  # subscription, and database.yml defines no `queue`/`cache`/`cable` connections --
+  # leaving solid_queue.connects_to in place made the app fail to boot outright in
+  # production. Rails' built-in defaults are correct for this single-container setup.
+  # See docs/DEPLOYMENT_IMPLEMENTATION_PLAN.MD section 2.2.
 
   # Ignore bad email addresses and do not raise email delivery errors.
   # Set this to true and configure the email server for immediate delivery to raise delivery errors.
   # config.action_mailer.raise_delivery_errors = false
 
-  # Set host to be used by links generated in mailer templates.
-  config.action_mailer.default_url_options = { host: "example.com" }
+  # Mailers are unused (ApplicationMailer is never subclassed), so there is no
+  # default_url_options host to set and no SMTP to configure.
 
   # Specify outgoing SMTP server. Remember to add smtp/* credentials via rails credentials:edit.
   # config.action_mailer.smtp_settings = {
@@ -79,12 +83,15 @@ Rails.application.configure do
   # Only use :id for inspections in production.
   config.active_record.attributes_for_inspect = [ :id ]
 
-  # Enable DNS rebinding protection and other `Host` header attacks.
-  # config.hosts = [
-  #   "example.com",     # Allow requests from example.com
-  #   /.*\.example\.com/ # Allow requests from subdomains like `www.example.com`
-  # ]
-  #
-  # Skip DNS rebinding protection for the default health check endpoint.
-  # config.host_authorization = { exclude: ->(request) { request.path == "/up" } }
+  # DNS rebinding protection. The Cloudflare Tunnel terminates TLS at the edge and
+  # forwards to localhost:3010, so the only Host header Rails ever sees in production
+  # is the public apex. Image requests are served by Cloudflare straight from B2
+  # (files.cyberjayahappenings.me) and never reach this app.
+  config.hosts = [ "cyberjayahappenings.me" ]
+
+  # Skip DNS rebinding protection for the default health check endpoint, so an
+  # external uptime monitor can probe /up by IP or hostname without a Host allowlist
+  # entry. Uncommented together with config.hosts above; the ssl_options sibling below
+  # stays commented, which is why /up answers a plain-HTTP probe with an HTTPS redirect.
+  config.host_authorization = { exclude: ->(request) { request.path == "/up" } }
 end

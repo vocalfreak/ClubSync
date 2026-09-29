@@ -16,15 +16,18 @@ services:
     environment:
       DATABASE_HOST: db
     ports:
-      # Host-side port, bound to loopback only — confirm 3010 is actually
-      # free on the E5440 (check `docker ps` / `ss -tlnp` first; ProPro
-      # staging's compose setup may already be claiming a port in this
-      # range) before first run. Loopback-only because Tailscale Funnel
-      # only ever proxies to 127.0.0.1 — no need to also expose this on
-      # the LAN.
+      # Host-side port, bound to loopback only. Confirm 3010 is actually free on
+      # the E5440 (check `docker ps` / `ss -tlnp` first; ProPro staging's compose
+      # setup may already be claiming a port in this range) before first run.
+      # Loopback-only because the Cloudflare Tunnel's cloudflared process runs on
+      # the host and reaches the app over 127.0.0.1 -- no need to also expose this
+      # on the LAN. NOTE: this also means you cannot verify /up from your WSL
+      # machine; run the curl inside an SSH session on the box.
       - "127.0.0.1:3010:3000"
     volumes:
-      - .:/app
+      # No .:/app bind mount in production: it would shadow the code baked into
+      # the image and hide the fact that public/assets was precompiled at build
+      # time. Host code changes need `docker compose up -d --build`.
       - bundle_cache:/usr/local/bundle
     restart: unless-stopped
 

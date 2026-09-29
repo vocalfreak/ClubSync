@@ -36,6 +36,17 @@
 !/app/assets/builds/.keep
 /public/assets
 
+# Ignore local data, dumps and scratch files. backups/ holds pg_dump output
+# (~1.1 MB), data/apify_export/ holds raw scraped JSON, test.jpg is a 346 KB
+# committed fixture, Design_mockups/ is untracked design work -- none of it
+# belongs in a production image.
+backups/
+/data/apify_export/
+/Design_mockups/
+/test.jpg
+/docs/
+/test/
+
 # Ignore CI service files.
 /.github
 

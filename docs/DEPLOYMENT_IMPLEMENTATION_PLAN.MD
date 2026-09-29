@@ -1,227 +1,225 @@
-# ClubSync — Public Site & Admin Review Worklist
+# ClubSync — Deployment (E5440, Docker Compose, Cron, Ops)
 
-*Elaborates the master plan's Phase 5. Decided this session: Namecheap `.me` domain (via GitHub Student Pack) + Cloudflare Tunnel for the public path. Tailscale stays admin-only — the two paths should never overlap.*
+*Covers the master plan's compute/orchestration and Phase 1 containerization. **Scope: deployment only** — the public *path* (domain, DNS, tunnel) is in, the public *pages* are deferred to §8. Nothing in §8 blocks the deploy: `/up` is a complete smoke test for the tunnel. §1 lists what blocks the first deploy; §9 is the worklist, in three parallel tracks (B domain/tunnel, A app, C image host).*
 
-## 1. Domain & DNS
+## 0. Target
 
-- Claim the domain: `nc.me/landing/github` (GitHub Student Pack) → get `<name>.me`, free for the first year, free SSL cert bundled (though the cert ends up unused here — Cloudflare's edge issues and terminates its own).
-- Add the site to Cloudflare (free plan). Cloudflare assigns two nameservers.
-- In Namecheap: Domain List → Manage → Nameservers → Custom DNS → paste Cloudflare's two nameservers.
-- Wait for propagation (minutes to ~24h) — confirm via the Cloudflare dashboard showing the zone as "Active."
-- From this point on, Namecheap is purely the registrar of record. Every actual DNS record (the tunnel's CNAME, anything else) is managed in Cloudflare's dashboard, not Namecheap's — that split is the thing worth internalizing, not just clicking through.
+Self-hosted on the revived Dell Latitude E5440, which also runs ProPro's *staging*. `app` + `db` containers, a host crontab, a host systemd service. No Kubernetes, no deploy pipeline.
 
-## 2. Cloudflare Tunnel — one-time creation
+## 1. Blockers to clear before the first deploy
 
-- Cloudflare Zero Trust dashboard → Networks → Tunnels → Create a tunnel, or via CLI:
+All six are config, no new code. **4 and 6 are fixed** (A1); 1–3 are `.env` values waiting on the box (A2); 5 is a hostname string waiting on the zone (B5). Evidence that 4 was a real boot failure: `RAILS_ENV=production bin/rails runner` raised `The 'cable' database is not configured for the 'production' environment` on a clean checkout — which also meant the Dockerfile's `assets:precompile`, and therefore the image build, could not succeed.
+
+| # | Blocker | Fix | State |
+|---|---|---|---|
+| 1 | No `SECRET_KEY_BASE` — no `credentials.yml.enc`, no `master.key`, not in `.env`. Rails raises on boot. | §3 | A2 |
+| 2 | No `DATABASE_URL` — `config/database.yml:14-16` gives production *only* `url: ENV["DATABASE_URL"]` | `postgres://clubsync:<pw>@db/clubsync_production` — host `db`, not `localhost` | A2 |
+| 3 | No `POSTGRES_PASSWORD` — `docker-compose.yml:36` interpolates `${POSTGRES_PASSWORD}` from the host env, so Postgres gets an empty password | §3 | A2 |
+| 4 | The solid gems each eager-load a `Record` that calls `connects_to` for a `:cache`/`:queue`/`:cable` database `config/database.yml` doesn't define. Boot failure, and `entrypoint.sh` runs `db:prepare` on every start. | §2.2 — removed the gems, not just the config | **fixed** |
+| 5 | Compose publishes host **3010**; the tunnel ingress said `localhost:3000` | `localhost:3010` — §5 | B5 |
+| 6 | `volumes: - .:/app` shadows the image's precompiled `public/assets` (gitignored, absent on the host) → every CSS/JS request 404s | §2.1 | **fixed** |
+
+## 2. Docker Compose
+
+The one line that matters: `127.0.0.1:<host>:3000`, never `0.0.0.0` or bare. Loopback means `cloudflared` is the only way in from outside the box — the entire point of a tunnel, and easy to lose to a copy-paste.
+
+### 2.1 Committed file vs. the original sketch
+
+`name: clubsync` scopes every network and volume to this project, and pinned `container_name`s are the real guard against ProPro's compose project — both stronger than the sketch's explicit network. The `db` service has no host port, plus a `pg_isready` healthcheck and `depends_on: condition: service_healthy`. Also `postgres:16-alpine` (the sketch said 17), and `env_file: .env` on `app` only — `db` interpolates `${POSTGRES_PASSWORD}` from the host env, so `.env` values stay readable by the app container.
+
+**The `.:/app` bind mount is dropped.** It maps the host checkout over `/app` live — right for local dev, wrong for production. It deletes the build output (the image precompiles into `/app/public/assets`; `public/assets` is gitignored so the host copy has none, and the mount lands on top), and it makes the filesystem authoritative for what's running. Keep hot reload in a local-only `docker-compose.override.yml`, never the file you deploy from. No log mount needed — `production.rb` logs to STDOUT.
+
+Undecided, none of it load-bearing: no `healthcheck:` on `app` despite the published port; no log rotation (the `json-file` driver grows unbounded); `environment: DATABASE_HOST: db` is dead config (`database.yml` never reads it); `bundle_cache:/usr/local/bundle` keeps gems across rebuilds but also keeps *stale* gems across a `Gemfile` change until `docker compose down -v`.
+
+### 2.2 Solid Queue / Cache / Cable — the gems are gone, not just the config
+
+`database.yml` is 16 lines with no `cache:`/`queue:`/`cable:` blocks, while stock `rails new` `production.rb` wires all three. That's blocker 4, and it was worse than "raises in production": **the app could not boot in production at all.** Verified — `RAILS_ENV=production SECRET_KEY_BASE_DUMMY=1 bin/rails runner 'puts "OK"'` failed with `ActiveRecord::AdapterNotSpecified`. Since `assets:precompile` boots the app, the image build failed too.
+
+None of the three is used. **Solid Queue** — `app/jobs/` holds only the stock 6-line `ApplicationJob`; zero `perform_later`, zero job classes. The pipeline is synchronous inside one `bin/rails clubsync:ingest`, and the master plan already settled it: *"Background jobs / workers: None, anywhere in this pipeline."* **Solid Cache** — zero `Rails.cache` calls; `perform_caching = true` is boilerplate with nothing behind it. **Solid Cable** — no `app/channels/` at all.
+
+**Why the gems go, not just the config.** Deleting the five config lines and keeping the gems does not work, and the second failure teaches it: all three engines call `isolate_namespace` then eager-load their `Record` class in production, and each `Record` calls `connects_to` at load time. `solid_cable`'s raises `NoMethodError` on a `nil` `config_for("cable")`. The gems are boot-time coupling to three databases that do not exist, so removing them is the only way to make the single connection correct — and the smaller change: **-3 gems, -5 config lines, -2 config files, -1 binstub, -3 schema files**, no behaviour change.
+
+The alternative costs 3 more Postgres databases on a shared box plus a supervisor *inside the web process*, so a wedged job or a DB blip can affect request handling on a box about to be internet-facing — bought for zero jobs. A database-backed queue also needs something to run the workers, and nothing here does.
+
+**`config/recurring.yml` is deleted, deliberately**, so the deletion doesn't read as an oversight. It was Rails-generated, production-only, and held one entry: `clear_solid_queue_finished_jobs`, hourly — Solid Queue cleaning up after itself, requiring the supervisor that doesn't exist. Nothing referenced it, and the engine reads the file only if present. If `solid_queue` returns, the file returns with it. The tell that it never ran: it sat alongside `puma.rb:37`'s unset `SOLID_QUEUE_IN_PUMA` plugin and a `bin/jobs` binstub for a queue that never received jobs.
+
+**Reversibility:** re-adding `solid_cache` is one `Gemfile` line plus a `cache:` block plus `db:cache:prepare`. Until then a single puma process makes in-memory fine, and Rails' `FileStore` default (what the app now boots with, verified) is right for a one-container deploy.
+
+### 2.3 Other `production.rb` leftovers
+
+Removed `config.active_storage.service = :local` — provably unused (`grep -rn "has_one_attached\|has_many_attached\|\.attach(\|variant(\|ActiveStorage" app/ lib/` returns zero hits; images go through `ObjectStore` → B2). Leaving it set is worse than leaving it boilerplate: `:local` would write into the container's untracked layer, now its only filesystem. Also removed `config.action_mailer.default_url_options = { host: "example.com" }` — dead, there is no email, and `app/mailers/application_mailer.rb` has no subclasses. `assume_ssl`/`force_ssl` were already set and are correct behind Cloudflare's edge.
+
+**`config.public_file_server.enabled` stays at its Rails 8 default of `true`, deliberately.** A generated `production.rb` normally sets it `false` on the assumption that nginx or thruster serves `/public` — and thruster *is* in the Gemfile, which makes that look reasonable. It doesn't apply: cloudflared forwards straight to Puma, so disabling it 404s every digest-stamped stylesheet. `grep` finds no `RAILS_SERVE_STATIC_FILES` anywhere in railties 8.0.5.1, so setting that env var would be cargo cult.
+
+**`config.hosts` is now `["cyberjayahappenings.me"]`.** The usual justification is backwards: production defaults to `@hosts = []`, and `default_middleware_stack.rb:16-17` only inserts `HostAuthorization` when hosts is non-empty — so before this change *every* `Host` header was accepted. Setting the domain turns the middleware on and locks the allowlist to one name. `files.cyberjayahappenings.me` is deliberately absent: image requests are served by Cloudflare straight from B2 and never reach the app.
+
+**Drift, fixed:** `Dockerfile:1` was `ruby:3.3-slim` while `.ruby-version` is `ruby-3.4.7`, the `Gemfile` pins `json ~> 2.12` citing Ruby 3.4, and CI runs 3.4. Bumped to `ruby:3.4-slim`. Not a build-breaker — `Gemfile.lock` has no `RUBY VERSION` pin and Rails 8.0.5.1 only needs >= 3.2 — it was drift, not breakage. `BUNDLE_WITHOUT="development:test"` is now set, so dotenv, brakeman, web-console and test tooling don't ship. `BUNDLE_DEPLOYMENT` is deliberately *not* set: it implies `path=vendor/bundle`, which would install gems into the app layer and defeat the `bundle_cache` volume. Still no `USER` directive, so the container runs as root — acceptable single-purpose, and changing it now would need `chown` of every writable path.
+
+## 3. Secrets
+
+`.env` backs both services, git-ignored, `chmod 600`, `scp`'d once over Tailscale, never committed. The tunnel credentials file gets identical treatment at `/etc/cloudflared/`, outside the repo, so it needs no `.gitignore` rule.
+
+**`SECRET_KEY_BASE` goes in `.env`.** The master plan opted out of encrypted credentials and every other secret is in `.env`; this follows rather than growing a new mechanism. It's also the only option that works — there is no `credentials.yml.enc` and no `master.key`, so `secret_key_base` resolves to `nil`. Run `bin/rails secret`, drop the output in `.env`. Rails checks `ENV["SECRET_KEY_BASE"]` before it looks for a credentials file. **Set once, never regenerate.**
+
+Also missing: `POSTGRES_PASSWORD` (blocker 3). `ADMIN_USERNAME`/`ADMIN_PASSWORD` belong with the admin surface (§8). `PUBLIC_IMAGE_BASE_URL` is the fifth — a new key, needed only once Track C has a working hostname (C7); until then `get_url` falls back to the raw B2 URL.
+
+Hygiene, fixed: `.env` was mode `0644`, so were `.env.development` and `.env.test`, and `.env` holds a live B2 key, Apify token, Gemini key and both webhook URLs (`chmod 600` is A2, on the box). `env.example` **now exists** — missing despite `REPO_STATE.md` §6 and `HEALTH_MONITORING_PLAN` §5 both describing it; it documents all 24 keys the code reads, flags the three production-only ones as having no default, and notes `GEMINI_EMBED_MODEL` is a separate model family from `GEMINI_MODEL`. `.dockerignore` now excludes `backups/` (~1.1 MB of `pg_dump`), `data/apify_export/`, `Design_mockups/`, `docs/`, `test/` and the committed 346 KB `test.jpg`. The stray lowercase `dockerignore` is deleted — Docker only ever read `.dockerignore`, so it was inert, and it wasn't itself excluded, so it was landing in the image.
+
+## 4. Cron via `whenever`
+
+The host crontab shells into the container. `whenever --update-crontab` runs on the **host**, never in a container, and must be re-run any time `schedule.rb` changes.
+
+```
+0 3 */2 * * cd /path/to/clubsync && /usr/bin/docker compose exec -T app bin/rails clubsync:ingest >> /path/to/clubsync/log/cron.log 2>&1
+```
+
+The entry point is the rake task `clubsync:ingest` (`lib/tasks/clubsync.rake:3` → `IngestionRunner.call`). Accounts are staggered by construction — `IngestionRunner` does `Account.all.each` sequentially (`ingestion_runner.rb:7`) — so no `sleep` between accounts and no offset cron lines.
+
+The `config/schedule.rb` in the tree renders a command that won't work from cron, on four counts: missing `-T` (cron has no TTY), no `cd` (crontab runs with `$HOME` as cwd, so `docker compose` finds no compose file), no redirect (cron mails output to nobody), and no `at:` so it fires at midnight rather than 03:00. `whenever --update-crontab` has never been run anywhere; there is no crontab in the repo and no cron daemon in the image, both by design.
+
+The cron time and the healthchecks.io period are one decision, not two — `HEALTH_MONITORING_PLAN` §5 sets period 2 days / grace 1 hour on check `clubsync-ingest`. Move the cron without the check and every run becomes a false "missed ping".
+
+## 5. Cloudflare Tunnel
+
+The CLI route, not the dashboard's token install — a deliberate choice for learning. On the box:
+
 ```
 cloudflared tunnel login
 cloudflared tunnel create clubsync
+cloudflared tunnel route dns --overwrite-dns clubsync cyberjayahappenings.me
 ```
-- Creating the tunnel generates a credentials file (`<tunnel-id>.json`). Give it the same treatment as `.env`: git-ignored, `chmod 600`, transferred once via `scp` over the Tailscale IP.
-- Route DNS to the tunnel — this auto-creates the CNAME in Cloudflare DNS:
-```
-cloudflared tunnel route dns clubsync events.<yourdomain>.me
-```
-- Ingress config (`~/.cloudflared/config.yml` on the E5440):
-```yaml
-tunnel: clubsync
-credentials-file: /home/<user>/.cloudflared/<tunnel-id>.json
 
+**`--overwrite-dns` is required, not optional.** The apex already carried proxied A/AAAA records, so a plain `route dns` fails with `An A, AAAA or CNAME record already exists with that host`. The flag replaces them with the tunnel CNAME. It touches **only the apex** — `www` is a separate record, handled at B5b.
+
+`/etc/cloudflared/config.yml` is canonical, because that is what the service reads:
+
+```yaml
+tunnel: <tunnel-id>
+credentials-file: /etc/cloudflared/<tunnel-id>.json
 ingress:
-  - hostname: events.<yourdomain>.me
-    service: http://localhost:3000
+  - hostname: cyberjayahappenings.me
+    service: http://localhost:3010
   - service: http_status:404
 ```
-- `http://localhost:3000` is the app's Compose-exposed port. *Why* that's bound to `127.0.0.1` only, and how `cloudflared` stays running persistently (systemd service), are deployment concerns — see the separate deployment doc, not duplicated here.
 
-## 3. Rails config (`config/environments/production.rb`)
+`credentials-file` must be an absolute path into `/etc/cloudflared/`. Left pointing at a home directory, the service starts, authenticates with no tunnel, and fails quietly.
 
-- `config.assume_ssl = true` and `config.force_ssl = true` — correct now that Cloudflare's edge terminates TLS, not the Rails process. Same three-hop model as ProPro (browser → Cloudflare edge → tunnel → origin), different reverse proxy.
-- `config.hosts << "events.<yourdomain>.me"` — Rails' host-authorization allowlist. Without this, Rails returns a 403 for a host it doesn't recognize, even though the tunnel is routing correctly.
-- Confirm the generated production boilerplate does **not** configure ActiveStorage `:local` (unused — B2 goes through the custom `ObjectStore`) or a Mailgun/mailer block (no email in ClubSync). Leave both out rather than configuring and disabling them.
+**3010, not 3000.** Compose publishes host 3010 → container 3000. 3000 is what the image `EXPOSE`s and what Puma binds *inside* the container. Aiming at 3000 is the likeliest way to get a tunnel that authenticates, connects, routes, and returns nothing.
 
-## 4. Public pages (no auth)
-
-Route + controller for browsing confirmed events. **This is blocked on the open `events`-table question** flagged in the master plan — whether "confirmed event" data lives directly on `posts` (`is_event`, `stage`) or in a separate `events` table joined to `posts` changes the query shape entirely. Sketch, assuming the former, so there's something concrete to react to:
-
-```ruby
-# app/controllers/events_controller.rb — sketch, pending the events-table decision
-class EventsController < ApplicationController
-  def index
-    @posts = Post.where(is_event: true, stage: :extracted).order(posted_at: :desc)
-  end
-end
-```
-
-If the `events` table turns out to be the real store, this becomes `Event.joins(:post).where(...)` instead. Don't build the view layer directly against `posts` columns until that's settled — it's a rewrite later, not an extension, if it goes the other way.
-
-## 5. Public "report this is wrong" action
-
-Same open dependency as §4 — what gets flagged needs somewhere to record it. Two honest options, not a decision:
-
-- **(a)** columns directly on `posts`/`events` (`flagged_at`, `flag_reason`)
-- **(b)** a small standalone `flags` table (`post_id`/`event_id`, `reason`, `created_at`) — better if more than one flag per post, or flag history, ever matters
-
-Whichever it is: a simple unauthenticated `POST`, rate-limited (§6), marking the post/event as needing human attention — feeding into the *same* admin surface as everything else needing review, not a separate workflow (already decided in the master plan).
-
-## 6. Rack::Attack
-
-```ruby
-# config/initializers/rack_attack.rb
-class Rack::Attack
-  throttle("flag-endpoint/ip", limit: 5, period: 1.minute) do |req|
-    req.ip if req.post? && req.path.match?(%r{\A/events/\d+/flag})
-  end
-
-  throttle("public-routes/ip", limit: 60, period: 1.minute) do |req|
-    req.ip unless req.path.start_with?("/admin")
-  end
-end
-```
-Add `gem "rack-attack"`; recent versions auto-insert the middleware, otherwise `config.middleware.use Rack::Attack` in `application.rb`. The limits above are starting points — cheap to retune once real traffic shows up.
-
-## 7. Admin/review surface (HTTP Basic Auth)
-
-```ruby
-# app/controllers/admin/base_controller.rb
-module Admin
-  class BaseController < ApplicationController
-    http_basic_authenticate_with name: ENV.fetch("ADMIN_USERNAME"), password: ENV.fetch("ADMIN_PASSWORD")
-  end
-end
-```
-`ADMIN_USERNAME`/`ADMIN_PASSWORD` in `.env`, same secrets handling as everything else.
-
-What it shows — decided vs. open:
-- **Decided, buildable now:** stalled posts — `Post.where.not(last_error: nil)`. Doesn't depend on anything unresolved.
-- **Open:** posts flagged for review via per-field confidence or the public flag action — depends on the same events/confidence-storage question as §4/§5.
-
-## 8. Order of operations
-
-1. Claim domain (Namecheap)
-2. Add to Cloudflare, delegate nameservers, wait for propagation
-3. Create tunnel + route DNS
-4. `production.rb` changes, deploy
-5. `cloudflared` running (deployment doc) pointed at the app's Compose-exposed port
-6. Verify `https://events.<domain>.me` actually reaches the app **before** building public pages against it — much easier to debug the tunnel with a stock Rails welcome page than with a half-built controller in the way
-7. Build public pages → Rack::Attack → admin surface, in that order — each layer benefits from the previous one already existing
-
-
-# ClubSync — Deployment (E5440, Docker Compose, Cron, Ops)
-
-*Elaborates the master plan's compute/orchestration and Phase 1 containerization items. Covers everything that keeps the app actually running on the box — not the public-site/domain work, which is its own doc.*
-
-## 0. What's being deployed, where
-
-Self-hosted on the revived Dell Latitude E5440, which also runs ProPro's *staging* environment — separate containers, separate Postgres, isolated Docker networks. No Kubernetes, no CI/CD pipeline for this project — deliberately minimal: a cron-triggered batch job plus a small public Rails app.
-
-## 1. Docker Compose layout
+Persistence on the host, not in Compose:
 
 ```
-clubsync/
-├── docker-compose.yml
-├── Dockerfile
-├── .env                # git-ignored, chmod 600
-└── ...
-```
-
-```yaml
-# docker-compose.yml
-services:
-  app:
-    build: .
-    env_file: .env
-    ports:
-      - "127.0.0.1:3000:3000"   # localhost-only -- cloudflared is the only thing that should ever reach this
-    depends_on:
-      - db
-    networks:
-      - clubsync
-
-  db:
-    image: postgres:17
-    env_file: .env
-    volumes:
-      - clubsync_pg_data:/var/lib/postgresql/data
-    networks:
-      - clubsync
-    # no ports: mapping here -- db is reachable only from app, via the clubsync network, never from the host directly
-
-networks:
-  clubsync:
-    name: clubsync_net   # distinct name so it can't collide with ProPro staging's compose network
-
-volumes:
-  clubsync_pg_data:
-```
-
-The one line that matters most: `127.0.0.1:3000:3000`, not `0.0.0.0:3000:3000` or bare `3000:3000`. Binding to localhost means the only way in from outside the box is through `cloudflared` — that's the entire point of a tunnel instead of directly exposing a port, and it's easy to silently lose that guarantee with a copy-pasted Compose file. The explicit `networks:`/named volume keep this stack from ever colliding with ProPro staging's compose project on the same host, even though both run Postgres.
-
-## 2. Secrets
-
-- `.env` — git-ignored, `chmod 600`. The same file backs both `env_file:` directives above: Postgres reads `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB`, Rails reads `DATABASE_URL`, the Apify token, B2 credentials, the Gemini API key, `ADMIN_USERNAME`/`ADMIN_PASSWORD`, and the healthchecks.io ping URL.
-- Transferred once via `scp` over the Tailscale IP, never committed — matches the account-level decision already made for ClubSync generally.
-- The `cloudflared` tunnel credentials file (`<tunnel-id>.json`, created in the public-site doc) gets identical treatment: `chmod 600`, `scp`'d over Tailscale, git-ignored.
-
-## 3. Cron via the `whenever` gem
-
-```ruby
-# config/schedule.rb
-every 2.days, at: "3:00 am" do
-  # stagger across the 41 accounts inside the rake task itself (e.g. a
-  # sleep/spread between each account's Apify call), not via multiple
-  # cron lines -- keeps this schedule file simple and the staggering
-  # logic in Ruby where it's testable
-  runner "ClubSync::Ingestion.run_all", output: "log/cron.log"
-end
-```
-
-`whenever --update-crontab` runs on the **host**, not inside a container — it writes directly to the host's crontab, which then shells into Docker:
-
-```
-0 3 */2 * * cd /path/to/clubsync && /usr/bin/docker compose exec -T app bin/rails runner 'ClubSync::Ingestion.run_all' >> /path/to/clubsync/log/cron.log 2>&1
-```
-
-`-T` disables pseudo-TTY allocation for `docker compose exec` — cron has no TTY, and this call fails without it. Re-run `whenever --update-crontab` any time `schedule.rb` changes; it isn't applied automatically.
-
-## 4. `cloudflared` as a persistent service
-
-Tunnel creation, DNS routing, and the ingress config are covered in the public-site doc — this is just "keep it running":
-
-```
-sudo cloudflared service install
+sudo cloudflared --config /etc/cloudflared/config.yml service install
 sudo systemctl enable --now cloudflared
-systemctl status cloudflared   # confirm it's back up after any reboot
 ```
 
-Runs as a systemd service directly on the host, not containerized — the simplest way to guarantee it survives a reboot without wiring it into the Compose stack.
+**`--config` is passed explicitly, deliberately.** `sudo` sets `$HOME=/root`, which is how cloudflared loses track of a config it found as your user; the bare command works only by falling back to run-time search order. Passing the path makes the systemd unit unambiguous and matches Cloudflare's own guidance for the sudo case. The old runbook claimed the bare command was fine in one place and blamed a missing `--config` in another — that contradiction is resolved.
 
-## 5. Health monitoring delivery
+Two copies of `config.yml` now exist and will drift. The upside: the tunnel survives removal of the user account.
 
-healthchecks.io ping at the end of a successful ingestion run:
-```ruby
-# at the end of ClubSync::Ingestion.run_all, on success
-Net::HTTP.get(URI(ENV.fetch("HEALTHCHECKS_PING_URL")))
-```
-Missed-ping alerting: healthchecks.io's native Telegram integration (connect the bot, `/start`, no custom bot code) — **this is the confirmed decision from the master plan.**
+Domain, once: claim it (Namecheap `.me` via the GitHub Student Pack), add it to Cloudflare free, set Namecheap's custom nameservers to Cloudflare's two, wait for the zone **Active**. After that Namecheap is registrar of record only. **Done — the zone is Active.**
 
-A note worth flagging rather than silently resolving: a separate, still-open question (posed earlier, not yet answered) mentioned a possible `DiscordNotifier` as part of a larger `IngestionRunner` health-object set. If that direction gets picked instead, this section needs revisiting — as it stands, healthchecks.io + Telegram is the only thing actually decided, and it's what this doc builds against.
+## 6. Health monitoring
 
-## 6. Coexistence with ProPro staging
+Built and tested, and better than a single success ping. `HealthPing` (`app/services/health_ping.rb`) pings `/start` at run begin, `/fail` immediately from the crash branch, and bare success otherwise — so a genuine crash alerts immediately instead of waiting out the grace window, which is reserved for "nothing could call `/fail` at all" (box down, OOM-kill, cron never fired). It is hermetic: it rescues and logs its own errors and no-ops when the ping URL is blank, so a misconfigured check degrades to "no external backstop", never to a crash.
 
-Separate compose project, separate Postgres container/volume, separate Docker network (§1) — no shared state between the two. Spot-check resource contention under real concurrent load with `docker stats` / `htop` once both have been running for a while — this was flagged as an intent to verify, not something to just assume holds indefinitely.
+**Missed-ping alerting is Discord → `#clubsync-alerts`**, via healthchecks.io's native Discord integration. This is *not* app code: the app only pings, healthchecks.io detects the miss and posts itself — one webhook URL in their Integrations tab, zero Ruby. The master plan §2 and `HEALTH_MONITORING_PLAN` §5 both said Discord; an earlier draft here claimed Telegram, which appears nowhere in the repo and is explicitly deferred in the master plan's v1 scope. Telegram would also have meant running a bot and `/start`ing it — a second identity and channel for the same alert class.
 
-## 7. Tailscale (admin access only)
+One live gap: `DISCORD_ALERT_WEBHOOK_URL` is present but **empty**, and `discord_notifier.rb:24,32` post the Gemini-outage alert to it — so a detected outage is logged and silently dropped. (`DISCORD_LOG_WEBHOOK_URL`, the per-run summary to `#clubsync-log`, is set and working.) Also inert by design, from missing env vars: `GEMINI_DAILY_REQUESTS`/`GEMINI_DAILY_TOKENS` (soft-cap alert) and `GEMINI_EMBED_MODEL` (the dedup tiebreaker).
 
-Already set up per the master plan: SSH into the E5440 from anywhere, no port-forwarding; lid-close sleep disabled. Strictly separate from the public path in §4 of the public-site doc — nothing about the Cloudflare Tunnel setup should also be reachable over the tailnet-only path, and vice versa. Conflating Serve/Funnel/reverse-proxy layers is a common, very debuggable-in-hindsight source of "which hop is actually broken" confusion — worth keeping the two paths mentally (and configurationally) separate from day one.
+## 7. ProPro coexistence & Tailscale
 
-## 8. First-deploy order of operations
+Separate compose project, pinned container names, separate volume and network, separate Postgres — no shared state. Spot-check contention with `docker stats`/`htop` once both have run under real load; that's a to-verify, not an assumption.
 
-1. Provision Docker + Compose on the E5440 (if not already there)
-2. `scp` `.env` + the tunnel credentials file over Tailscale
-3. `docker compose up -d`, then run migrations: `docker compose exec app bin/rails db:migrate`
-4. Install `cloudflared` as a systemd service, confirm the tunnel reaches the app (public-site doc, §8 step 6)
-5. `whenever --update-crontab` on the host
-6. Trigger one ingestion run manually first (`docker compose exec app bin/rails runner ...`) before trusting cron to do it unattended
-7. Confirm a healthchecks.io ping actually lands after that manual run
-8. Confirm ProPro staging's containers are unaffected (`docker stats`)
+Tailscale is SSH-only, never port-forwarded, lid-close sleep already disabled. Keep it strictly separate from the tunnel: conflating Serve/Funnel/reverse-proxy hops is a very debuggable-in-hindsight source of "which layer is broken". The one place the two paths touched in the repo was a stale `docker-compose.yml` comment justifying the loopback bind with "Tailscale Funnel only ever proxies to 127.0.0.1", the pre-tunnel decision. Reworded to name cloudflared.
+
+## 8. Deferred — public pages & admin surface
+
+Parked 2026-09-27, not cancelled. Four master-plan Phase 5 items: the public events index, the "report this is wrong" action (and its storage shape, still unanswered), Rack::Attack (gem not in the bundle), and the admin/review surface (no auth exists; `gem "bcrypt"` is commented out at `Gemfile:25`). A fifth, public image delivery, was parked here and has since been *decided*: the Track C Transform Rules setup, config-only, no Ruby.
+
+**The events-table question is settled, against the old sketch.** `db/schema.rb:49-71` has the `events` table, `app/models/event.rb` exists, `events.post_id` is uniquely indexed — strictly 1:1 with `posts`. So the query is `Event.joins(:post).where(posts: { is_event: true, stage: :deduped })`, not `Post.where(...)`. The filter is `stage: :deduped` (terminal), and lists render *event groups* via `events.event_group_id`, each card showing the canonical member's row. "Canonical = longest caption" lives in `app/services/deduplicator.rb`, not on the model — `Event` is 4 lines with no scopes, so the index's query will be the first scopes written on it.
+
+**Public image delivery — Cloudflare Transform Rules, no app route.** Per [Backblaze's walkthrough](https://www.backblaze.com/blog/free-image-hosting-with-cloudflare-transform-rules-and-backblaze-b2/): a public bucket, a CNAME straight to the bucket hostname, and up to 10 free Transform Rules that rewrite the URL and fix cache headers. Better than the app-route idea it replaces because images never touch the E5440: `files.<domain>` → CNAME → B2, a path entirely separate from the apex → tunnel → the box.
+
+The reason it matters is cost, not access control. B2's free allowance is 2,500 Class B transactions/day *account-wide* plus 1 GB/day egress, and every browser load of an `<img>` pointing at a bare B2 URL is its own `b2_download_file_by_name`. A script run of 200–300 downloads is nothing against that; a public site spends it per visitor per page view. Past the free tier it's $0.004 per 10,000, and no credit card is required to hold an account — so the realistic failure mode is uploads being *rejected*, not billed.
+
+Three ClubSync-specific facts worth keeping:
+
+- **The article's immutability caveat is already satisfied structurally.** It warns that a one-year `cache-control` "effectively assumes once created, files on the image host are immutable." Keys are `SHA256(bytes)` plus a constant extension suffix, so identical bytes ⇒ identical key ⇒ identical object, forever. The year-long TTL is correct here, and it's what makes repeat views free.
+- **The key must carry a `.webp` extension — load-bearing, not cosmetic.** [Cloudflare's default cache behavior](https://developers.cloudflare.com/cache/concepts/default-cache-behavior/) picks eligibility **by file extension, not MIME type**, and a bare `<sha256>` is not on the list, so it returns `cf-cache-status: DYNAMIC` — never cached, every view spending a Class B transaction. The `cache-control` rewrite cannot rescue it: eligibility is decided at request time, a response-header rewrite happens after. A DYNAMIC at C6 means the *key* is wrong, not the rules.
+- **The public URL leaks nothing.** The rewrite strips `/file/<bucket>`, so browsers see `https://files.<domain>/<sha256>.webp` — a content hash of a post already public on Instagram.
+
+Two easy-to-miss settings: **SSL/TLS must not be left on "Flexible"** (Cloudflare fetches upstream over plain HTTP, B2 is HTTPS-only → **522**), and **Automatic Signed Exchanges must be off** (SXG is incompatible with B2).
+
+**One code change landed, one pending.** `ObjectStore#get_url` now prefers `ENV["PUBLIC_IMAGE_BASE_URL"]` and falls back to the raw B2 URL, so dev keeps hitting B2 while prod emits the CDN hostname; it reads the injected `@bucket` rather than re-reading the env var (it had silently ignored a `bucket:` argument), and `chomp`s a trailing slash. `get_url` has zero callers today. Still pending: `ObjectStore#put` must derive an extension from its `content_type` argument so keys are `<sha256>.webp` rather than bare hex — see C0. The *env value* for `PUBLIC_IMAGE_BASE_URL` remains blocked on C7, separately from that code fix.
+
+Also noted, not decided: the public index shape (recommend upcoming-first with past events faded below, no query params yet, though the frozen 37-value `EventTags` list was built to feed a filter), and public-site uptime monitoring (the master plan's last Phase 5 item; the monitor must hit `https://` directly).
+
+## 9. Order of operations & worklist
+
+**Three parallel tracks, not a sequence.** Nameserver propagation — the one step whose pace wasn't yours — is finished, so the work is B4–B8 and A2–A7, with Track C (config-only, unblocks nothing here) floating free alongside either.
+
+The app work goes first *within* the parallel stretch, for a debugging reason rather than a dependency one: if the tunnel test fails and you haven't proven the origin, you have three candidate causes — DNS, tunnel routing, or the app. If `/up` already returns 200 on loopback, it has exactly one. Same argument the master plan makes in the other direction, applied to ordering.
+
+### Track B — domain & tunnel · yours, external accounts
+
+**B1–B3 are done: the zone is Active.** Nothing below is implied by that — a zone serving DNS says nothing about whether a tunnel exists.
+
+- [x] **B1** **DONE** — domain is `cyberjayahappenings.me`, claimed via the GitHub Student Pack (Namecheap).
+- [x] **B2** **DONE** — Cloudflare account (free) created, domain added as a zone. Established by the zone reaching Active, only possible once Cloudflare is authoritative.
+- [x] **B3** **DONE** — Namecheap custom nameservers set to Cloudflare's two, propagation finished. **This was the wait; it gated B5.**
+- [ ] **B4** `cloudflared tunnel login` && `cloudflared tunnel create clubsync` · §5
+- [ ] **B5** `cloudflared tunnel route dns --overwrite-dns clubsync cyberjayahappenings.me` · §5 — the flag is required; the apex already had records
+- [ ] **B5b** Cloudflare UI only, no tunnel or `config.hosts` change: ensure a proxied `www` record exists (if the old ones are gone, an `AAAA` to `100::` is enough), then a Redirect Rule — host equals `www.cyberjayahappenings.me`, dynamic target `concat("https://cyberjayahappenings.me", http.request.uri.path)`, 301, preserve query string. Test with 302 first, then switch to 301. Verify with `curl -I https://www.cyberjayahappenings.me/anything` and check `location:` preserves the path
+- [ ] **B6** Write `/etc/cloudflared/config.yml` with ingress → `http://localhost:3010` · §5
+- [ ] **B7** `sudo cloudflared --config /etc/cloudflared/config.yml service install` && `sudo systemctl enable --now cloudflared` · §5
+- [ ] **B8** `curl -I https://cyberjayahappenings.me/up` → 200
+
+### Track A — app · A1 is ours, A2–A7 are yours on the box
+
+- [x] **A1** Repo fixes — the six blockers in §1, expanded below. **DONE**, verified locally: production boot, `assets:precompile`, rubocop, 277 tests / 1175 assertions green. The Docker *image build* is the one unverified piece — no Docker in the WSL session, so it has to run on the box (A4)
+- [ ] **A2** On the E5440, add to `.env`: `SECRET_KEY_BASE` (`bin/rails secret`), `POSTGRES_PASSWORD`, `DATABASE_URL` (`postgres://clubsync:<pw>@db/clubsync_production` — host `db`, not `localhost`), and `DISCORD_ALERT_WEBHOOK_URL` (empty today, so Gemini-outage alerts are silently dropped). Then `chmod 600` on `.env`, `.env.development`, `.env.test`. · §3, §6
+- [ ] **A3** `scp` `.env` over Tailscale
+- [ ] **A4** `docker compose up -d`, then `curl -I http://127.0.0.1:3010/up` → 200. **If this doesn't work, stop** — nothing downstream matters yet
+- [ ] **A5** `docker compose exec app bin/rails clubsync:ingest` by hand; confirm a healthchecks ping landed and the run summary reached `#clubsync-log` · §6
+- [ ] **A6** `whenever --update-crontab` on the host · §4
+- [ ] **A7** healthchecks.io: **the check already exists** — a live `hc-ping.com` UUID is in `.env`. Verify period 2d / grace 1h and add the Discord integration → `#clubsync-alerts`. Don't create a second check. · §6
+
+#### A1 expanded — repo changes
+
+| File | Change | Blocker |
+|---|---|---|
+| `config/environments/production.rb` | dropped `cache_store`, `active_job.queue_adapter`, `solid_queue.connects_to`, `active_storage.service`, `action_mailer.default_url_options`; **set** `config.hosts = ["cyberjayahappenings.me"]` and uncommented the `/up` `host_authorization` exclusion. Added a note that `public_file_server.enabled` must stay `true` | 4, 6 |
+| `config/cable.yml` | production `solid_cable` block → `adapter: async`. The block couldn't just be deleted — `solid_cable`'s engine eager-loads `SolidCable::Record`, which raises on a `nil` `config_for("cable")` | 4 |
+| **`Gemfile`** | **removed all three solid gems.** Unplanned but forced: every solid engine eager-loads its `Record` class, which calls `connects_to` at boot. The gem removal, not the config removal, is what actually clears blocker 4 | 4 |
+| `config/recurring.yml`, `config/cache.yml`, `config/queue.yml`, `bin/jobs`, `db/{cache,queue,cable}_schema.rb` | **deleted** — all dead once the gems go. `recurring.yml`'s rationale in §2.2 | 4 |
+| `config/puma.rb` | removed `plugin :solid_queue if ENV["SOLID_QUEUE_IN_PUMA"]` (referenced a now-absent gem; was inert either way) | 4 |
+| `docker-compose.yml` | dropped `.:/app`; reworded the stale "Tailscale Funnel" comment to name cloudflared, and noted the loopback bind means `/up` can only be verified from an SSH session on the box | 6 |
+| `config/schedule.rb` | added `at: "3:00 am"`, `cd`, `-T`, `>> log/cron.log 2>&1`, and an `APP_ROOT` constant to edit once. Header says to run `whenever --update-crontab` **on the host** | — |
+| `Dockerfile` | `ruby:3.3-slim` → `ruby:3.4-slim`; `BUNDLE_WITHOUT="development:test"`. Explicitly *not* `BUNDLE_DEPLOYMENT` | — |
+| `.dockerignore` | added `backups/`, `data/apify_export/`, `Design_mockups/`, `test.jpg`, `docs/`, `test/` | — |
+| `dockerignore` (repo root) | **deleted** — stray lowercase duplicate, committed, inert, and baked into the image | — |
+| `env.example` | **created** — all 24 keys the code reads, no real values. `PUBLIC_IMAGE_BASE_URL` as a blank optional key | — |
+| `app/services/object_store.rb` | `get_url` prefers `PUBLIC_IMAGE_BASE_URL`, falls back to the raw B2 URL, `chomp`s a trailing slash, uses the injected `@bucket`. **Not a deploy blocker** — the value waits on C7 | — |
+| `test/services/object_store_test.rb` | 4 new tests: fallback, preference, trailing slash, injected-bucket regression | — |
+
+One future cliff: the Student Pack domain is free for the first year, and the tunnel hostname dies with the domain — a lapse takes the public path down. Recurs annually.
+
+### Track C — image host · Cloudflare config, no deploy dependency
+
+Needs only the Active zone, so C1–C5 can run alongside B4–B8. Needed before the deferred pages, not before the deploy. Article: [Backblaze walkthrough](https://www.backblaze.com/blog/free-image-hosting-with-cloudflare-transform-rules-and-backblaze-b2/). *Written Feb 2022; the Transform Rules UI has moved since — the free-plan rule count and dashboard paths are worth confirming as you go.*
+
+- [ ] **C0** *(blocks C1)* `ObjectStore#put` must derive an extension from its `content_type` argument, so keys are `<sha256>.webp` rather than bare hex. Without it every image URL is ineligible for edge caching (`cf-cache-status: DYNAMIC`) and C6 cannot pass. Deriving from `content_type` rather than hardcoding `.webp` keeps the method honest, and a `.bin` fallback degrades an unfamiliar type to a wrong-but-working suffix instead of failing the upload. The hash remains the whole identity and the extension is a constant suffix, so the immutability guarantee the year-long TTL rests on is untouched. Must land **before** any prod object is written, since prod is a fresh bucket and an extensionless key there is permanently uncacheable. Agreed approach: derive the extension, and wipe the dev DB's extensionless rows and their B2 objects rather than carry a second key shape
+- [ ] **C1** Set the B2 bucket to **public**, note its bucket hostname (the `fXXX.backblazeb2.com` in the file details) · §8
+- [ ] **C2** DNS: CNAME `files.<domain>` → that bucket hostname. **Confirm the record is proxied (orange cloud), not DNS-only** — with the proxy off, Cloudflare is not in the request path at all: no Transform Rules, no cache-control rewrite, no ETag, no CORS, no path rewrite, and every page view spends a Class B transaction. A **522** here is the article's intended intermediate state, not a failure, and **the fix is C3 — never un-proxy the record to clear it**, which would silently delete the reason this track exists · §8
+- [ ] **C3** SSL/TLS encryption mode: confirm it is `Full (strict)` or `Full`, **not** `Flexible` — Flexible causes the 522. ⚠️ *The apex returned 526 (invalid origin cert) before the tunnel was cut over, and a 526 is only possible when Cloudflare validates the origin cert, which Flexible never does. So the zone is most likely already at Full/Full(strict) and there may be nothing to change — **verify in the dashboard before ticking this.** Also note the blast radius is smaller than it looks: zone SSL mode does not govern the apex at all, because a tunnel's edge→origin hop is the tunnel's own encrypted channel. It matters only for the `files.` → B2 CNAME.* · §8
+- [ ] **C4** Turn **off** Automatic Signed Exchanges (SXG) — incompatible with B2, breaks in some browsers
+- [ ] **C5** Transform Rules, in order: **rewrite URL** dynamically to prepend `/file/<bucket>` (condition `not starts_with(http.request.uri.path, "/file/<bucket>")`, so short and long URLs both work) · **modify response header** to set a dynamic `ETag` from `concat(x-bz-content-sha1, x-bz-info-src_last_modified_millis, x-bz-file-id)` (each indexed `[0]`; empty ⇒ header omitted, which is right) and remove the `x-bz-*` headers · **modify response header** to raise `cache-control` from B2's `max-age=14400` to `public, max-age=31536000` (match the existing value, so B2's `no-store` on 404s passes through) · **CORS** `Access-Control-Allow-Origin: *` on `.webp`
+- [ ] **C6** Verify: `curl --head https://files.<domain>/<sha256>.webp` twice, using a real key from C1. The second response showing **`cf-cache-status: HIT`** is the direct evidence that repeat views have stopped spending Class B transactions. Confirm `cache-control: public, max-age=31536000` and the `x-bz-*` headers are gone. A 404 should still show `BYPASS`. **`DYNAMIC` instead of `HIT` means the key has no extension — C0 undone — not that the rules are wrong**: Cloudflare never considered the asset cacheable, so the request went straight to origin and no Transform Rule could have changed that · §8
+- [ ] **C7** Set `PUBLIC_IMAGE_BASE_URL=https://files.<domain>` in `.env` once C1–C6 work · §3, §8
+
+## 10. Known, deliberately
+
+Backups are out of scope (Instagram is the source of truth, a re-scrape is the recovery); `clubsync:snapshot` is dev-oriented with no rotation and no off-box copy. Kamal is in the Gemfile with a live `bin/kamal` but `config/deploy.yml` is untouched scaffold (`your-user`, `192.168.0.1`, `app.example.com`, a `/rails/storage` volume against an image that uses `/app`) and `.kamal/secrets` reads a `config/master.key` that doesn't exist — deleting it is cheaper than leaving it to mislead. CI is not a deploy pipeline, and it can't catch blocker 4 because the test env uses `:null_store` with no queue adapter.
+
+Worth stating positively: the **Tailwind v4 pipeline is built and working** (`app/assets/tailwind/application.css` → `app/assets/builds/tailwind.css`, 13.5 KB of real scanned utilities, wired in the layout, watcher in `Procfile.dev`, precompiled in the `Dockerfile`; ADR `2026-09-25-css-first-tailwind-v4-pipeline`). That's what blocker 6 destroys, and it means the deferred pages already have their CSS.

@@ -8,10 +8,10 @@ development:
 test:
   adapter: test
 
+# In-process adapter, single app container. Nothing in the app broadcasts or
+# subscribes today; this exists so ActionCable has a valid production config
+# rather than nil. Switch to a real adapter (and a `cable` connection in
+# database.yml) if a realtime feature is ever added.
+# See docs/DEPLOYMENT_IMPLEMENTATION_PLAN.MD section 2.2.
 production:
-  adapter: solid_cable
-  connects_to:
-    database:
-      writing: cable
-  polling_interval: 0.1.seconds
-  message_retention: 1.day
+  adapter: async

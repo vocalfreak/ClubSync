@@ -21,8 +21,17 @@ class ObjectStore
     key
   end
 
+  # PUBLIC_IMAGE_BASE_URL points at the Cloudflare-served image host, e.g.
+  # https://files.cyberjayahappenings.me, where Transform Rules rewrite requests
+  # onto this bucket and hold the response at the edge. Going through the edge is
+  # what keeps repeat page views off B2's 2,500/day free Class B transaction
+  # allowance, since every direct browser load is its own b2_download_file_by_name.
+  #
+  # Unset -- local dev, or on the box before the image host exists -- this falls
+  # back to the raw path-style S3 URL, which still works for a public bucket.
   def get_url(key)
-    "#{ENV['B2_ENDPOINT']}/#{ENV['B2_BUCKET']}/#{key}"
+    base = ENV["PUBLIC_IMAGE_BASE_URL"].presence&.chomp("/") || "#{ENV['B2_ENDPOINT']}/#{@bucket}"
+    "#{base}/#{key}"
   end
 
   def get(b2_key)
