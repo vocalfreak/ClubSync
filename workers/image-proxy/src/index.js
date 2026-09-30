@@ -1,27 +1,19 @@
 import { AwsClient } from "aws4fetch";
 
-// A stored image is addressed by SHA256(bytes) plus a constant suffix, so the
-// only path this host ever serves is /<64 hex>.webp. Validating it here is what
-// makes the signing credential safe to leave at the edge: an arbitrary path
-// never becomes a B2 request, and the same regex is why the old extensionless
-// objects are unreachable over HTTP.
+// Only /<64 hex>.webp is served, so arbitrary paths never become B2 requests.
 const KEY_PATTERN = /^\/[a-f0-9]{64}\.webp$/;
 
-// Content-addressed means immutable, so a year is the honest max-age rather than
-// a hopeful one: the bytes at a key can never change.
+// Keys are content hashes, so the bytes at a key never change.
 const IMMUTABLE = "public, max-age=31536000, immutable";
 
-// A miss on a real key is worth remembering briefly -- a deploy that points the
-// site at a not-yet-rekeyed key should not hammer B2 -- but never for long,
-// because the fix is a rekey, not a wait.
+// Missing keys are cached briefly to protect B2, but not long: the fix is a rekey.
 const NEGATIVE = "public, max-age=60";
 
 const DEFAULT_TYPE = "image/webp";
 
-// Everything the client is allowed to see. B2's own headers (x-amz-*, x-bz-*,
-// server timing) are not forwarded: they are B2's internals, and the one that
-// matters for verification is the x-cache header below, set here.
-function publicHeaders(upstream, { cacheControl, cacheStatus, status }) {
+// Builds the client-facing headers from a whitelist. B2 headers (x-amz-*, x-bz-*)
+// are never forwarded. x-cache is set here so the cache can be verified with curl.
+function publicHeaders(upstream, { cacheControl, cacheStatus }) {
   const headers = new Headers({ "Cache-Control": cacheControl, "x-cache": cacheStatus });
   const type = upstream?.headers.get("content-type");
   headers.set("Content-Type", type?.startsWith("image/") ? type : DEFAULT_TYPE);
@@ -36,9 +28,7 @@ function publicHeaders(upstream, { cacheControl, cacheStatus, status }) {
   return headers;
 }
 
-// AwsClient#sign is a method on the instance and is async, so the signer handed
-// to the handler is a closure over it -- a plain function that the injected-fake
-// tests can replace, and the real one can be awaited.
+// Wraps AwsClient#sign (async) in a plain function so tests can inject a fake.
 function buildSigner(env) {
   const aws = new AwsClient({
     accessKeyId: env.B2_READ_KEY_ID,
@@ -49,8 +39,7 @@ function buildSigner(env) {
   return (request) => aws.sign(request);
 }
 
-// endpoint may be a bare host or a full URL; the Rails ObjectStore passes
-// whatever is in .env, so accept both rather than making the operator notice.
+// Accepts a bare host or a full URL, matching whatever ObjectStore reads from .env.
 function b2Url(env, key) {
   const base = env.B2_ENDPOINT.replace(/\/+$/, "");
   return `${/^https?:\/\//.test(base) ? base : `https://${base}`}/${env.B2_BUCKET}${key}`;
@@ -72,8 +61,8 @@ export function createHandler({ env, fetchImpl, cache, signer, logger = console 
       return new Response("not found", { status: 404, headers: { "Cache-Control": "no-store" } });
     }
 
-    // Normalise to a GET with no query string so HEAD and GET share one entry
-    // and ?v=2 on an <img> can't fan out into a second cache key.
+    // Cache key is a plain GET with no query string, so HEAD and GET share an
+    // entry and ?v=2 can't create duplicates.
     const cacheKey = new Request(`${origin}${key}`, { method: "GET" });
     const cached = await cache.match(cacheKey);
     if (cached) {
@@ -82,8 +71,7 @@ export function createHandler({ env, fetchImpl, cache, signer, logger = console 
       return new Response(request.method === "HEAD" ? null : cached.body, { status: cached.status, headers });
     }
 
-    // A HEAD is an existence check, so it asks B2 for headers only and is never
-    // stored -- a bodyless entry under the shared cache key would poison the GET.
+    // HEAD responses are never cached: a bodyless entry would break later GETs.
     const outcome = await signAndFetch(sign, fetchImpl, env, key, request.method);
     if (outcome.error) {
       logger.error(`B2 read failed for ${key}: ${outcome.error}`);
@@ -96,8 +84,7 @@ export function createHandler({ env, fetchImpl, cache, signer, logger = console 
       if (request.method === "HEAD") return new Response(null, { status: 200, headers });
 
       const response = new Response(upstream.body, { status: 200, headers });
-      // Store the response, not the headers: the body streams to the client and
-      // to the cache at the same time, so a miss costs one B2 read, not two.
+      // Clone so the body streams to the client and the cache with one B2 read.
       ctx.waitUntil?.(cache.put(cacheKey, response.clone()));
       return response;
     }
@@ -109,17 +96,13 @@ export function createHandler({ env, fetchImpl, cache, signer, logger = console 
       });
     }
 
-    // Never the signed request or its headers: the Authorization signature is a
-    // credential. The status alone is enough to tell a 403 from a 500.
+    // Log the status only: the signed request carries a credential.
     logger.error(`B2 read failed for ${key}: status ${upstream.status}`);
     return new Response("bad gateway", { status: 502, headers: { "Cache-Control": "no-store" } });
   };
 }
 
-// A rejected fetch is a distinct outcome, not a Response: a network failure has
-// no status to branch on, and Response rejects anything outside 200-599.
-// `sign` is awaited because AwsClient#sign is async (WebCrypto), so a signer
-// passed in as a plain function still works.
+// Returns { response } or { error }: a network failure has no status to branch on.
 async function signAndFetch(sign, fetchImpl, env, key, method) {
   try {
     return { response: await fetchImpl(await sign(new Request(b2Url(env, key), { method }))) };
@@ -128,8 +111,8 @@ async function signAndFetch(sign, fetchImpl, env, key, method) {
   }
 }
 
-// The runtime calls this with the real fetch, caches.default and a live env
-// (vars from wrangler.toml, secrets from `wrangler secret put`).
+// Cloudflare calls this on every request. Vars come from wrangler.toml,
+// secrets from `wrangler secret put`.
 export default {
   fetch(request, env, ctx) {
     return createHandler({ env, fetchImpl: fetch, cache: caches.default })(request, ctx);
