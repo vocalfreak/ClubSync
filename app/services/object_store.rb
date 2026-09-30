@@ -1,4 +1,15 @@
 class ObjectStore
+  # Cloudflare picks cache eligibility by file extension, not MIME type, so the
+  # key must carry a recognised suffix or every response comes back DYNAMIC and
+  # each view spends B2's daily Class B transaction allowance. The extension is a
+  # constant suffix on the content hash, so identical bytes still map to exactly
+  # one object and the year-long TTL's immutability assumption holds.
+  EXTENSIONS = {
+    "image/webp" => ".webp",
+    "image/jpeg" => ".jpg",
+    "image/png" => ".png"
+  }.freeze
+
   def initialize(client: nil, bucket: nil)
     @client = client || Aws::S3::Client.new(
       access_key_id: ENV["B2_KEY_ID"],
@@ -11,7 +22,7 @@ class ObjectStore
   end
 
   def put(bytes, content_type: "image/jpeg")
-    key = Digest::SHA256.hexdigest(bytes)
+    key = "#{Digest::SHA256.hexdigest(bytes)}#{EXTENSIONS.fetch(content_type, '.bin')}"
     @client.put_object(
       bucket: @bucket,
       key: key,

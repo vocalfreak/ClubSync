@@ -117,7 +117,7 @@ Watch it to completion, then confirm two side effects: a run summary reached `#c
 
 This is the first point where Gemini, Apify, B2 and Discord are exercised together. A successful `/up` proves none of them.
 
-⚠️ **This run writes the first prod images to B2. Land C0 first** (plan, Track C — `ObjectStore#put` must derive the key's extension from `content_type`). Until then keys are bare SHA256 hex, which Cloudflare can never edge-cache, and on a fresh prod bucket they are permanent. It costs nothing to fix first: the image host doesn't exist yet and nothing reads these URLs. If you skip it, treat this run's images as throwaway.
+✅ **C0 has landed** (2026-09-30) — `ObjectStore#put` derives the key's extension from `content_type`, so this run writes `<sha256>.webp` keys to the fresh prod bucket and every image URL is edge-cacheable once Track C is up. Nothing to do here; keys are permanent on a new bucket, so this is the run where that mattered.
 
 ---
 
