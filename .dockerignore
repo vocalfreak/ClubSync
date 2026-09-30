@@ -47,6 +47,10 @@ backups/
 /docs/
 /test/
 
+# The image-host Worker. It is deployed from a dev machine with wrangler, never
+# bundled into the Rails image, and workers/*/node_modules is ~250 MB.
+/workers/
+
 # Ignore CI service files.
 /.github
 

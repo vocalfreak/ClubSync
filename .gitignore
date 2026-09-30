@@ -53,3 +53,10 @@ backups/
 data/apify_export/
 
 Design_mockups/
+
+# Cloudflare Worker (workers/image-proxy) -- dependencies, wrangler state, and
+# the local secrets file that holds a real B2 key. .dev.vars.example is the
+# committed template.
+node_modules/
+.wrangler/
+.dev.vars

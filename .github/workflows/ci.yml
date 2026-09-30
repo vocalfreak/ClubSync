@@ -53,6 +53,32 @@ jobs:
       - name: Lint code for consistent style
         run: bin/rubocop -f github
 
+  test_workers:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers/image-proxy
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: workers/image-proxy/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The image host is a Cloudflare Worker, deployed with wrangler rather than
+      # shipped in the Rails image, so it needs its own gate. The suite injects
+      # fetch and the cache, so it never reaches the network.
+      - name: Run worker tests
+        run: npm test
+
   test:
     runs-on: ubuntu-latest
 

@@ -1,0 +1,9 @@
+# Copy to .dev.vars for `wrangler dev` and fill in. Never commit the real file --
+# it is gitignored, and the values are a credential.
+
+# A Backblaze B2 application key: read-only, restricted to this one bucket.
+# Deliberately NOT named B2_KEY_ID / B2_APPLICATION_KEY -- those are the app's
+# upload key in .env, and reusing the names would make a copy-paste between the
+# two a silent privilege upgrade.
+B2_READ_KEY_ID=
+B2_READ_APP_KEY=

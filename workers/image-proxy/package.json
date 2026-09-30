@@ -1,0 +1,20 @@
+{
+  "name": "clubsync-image-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker serving ClubSync images from a private Backblaze B2 bucket",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "aws4fetch": "^1.0.20"
+  },
+  "devDependencies": {
+    "vitest": "^5.0.2",
+    "wrangler": "^4.144.0"
+  }
+}

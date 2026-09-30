@@ -1,0 +1,25 @@
+name = "clubsync-image-proxy"
+main = "src/index.js"
+compatibility_date = "2026-09-30"
+
+# The Cache API is only available on a Cloudflare-attached domain, so the
+# *.workers.dev fallback is turned off: serving through it would look like it
+# works while every request silently misses the cache.
+workers_dev = false
+
+# Custom Domains provisions the DNS record for the pattern on deploy.
+routes = [
+  { pattern = "files.cyberjayahappenings.me", custom_domain = true }
+]
+
+# These are the same three values the Rails app reads from .env (B2_ENDPOINT,
+# B2_BUCKET, B2_REGION). Not secrets -- an endpoint and a bucket name leak
+# nothing -- but they drift, and drift here is a 502 at the edge.
+[vars]
+B2_ENDPOINT = "https://s3.us-west-004.backblazeb2.com"
+B2_BUCKET = "REPLACE_ME"
+B2_REGION = "us-west-004"
+
+# The read-only, single-bucket B2 key lives in Worker secrets, never here:
+#   npx wrangler secret put B2_READ_KEY_ID
+#   npx wrangler secret put B2_READ_APP_KEY

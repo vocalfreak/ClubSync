@@ -2,11 +2,11 @@
 
 Ordered, copy-pasteable. `DEPLOYMENT_IMPLEMENTATION_PLAN.MD` is *why* each step exists; this file is *what to type*, in order, with a stop-gate at each risky point. Read it once before starting — do not run steps out of order, because out-of-order failures are ambiguous.
 
-**State:** A1 (repo fixes) done and verified locally. B1–B3 done (domain `cyberjayahappenings.me`, Cloudflare zone **Active**). Everything below is unticked. C0 — the image-key extension fix — is **specified (plan, Track C) but not yet applied**, and must land before Step 4, the first run that writes prod images.
+**State:** A1 (repo fixes) done and verified locally. B1–B3 done (domain `cyberjayahappenings.me`, Cloudflare zone **Active**). Everything below is unticked. C0 — the image-key extension fix, plus the one-off rekey — is **code-merged but not yet run on the box**; run Step 4b after Step 4 if a run predates the rebuild.
 
 ---
 
-## Step 0 — Fill in these five things
+## Step 0 — Fill in these four things
 
 Substitute as you go, or edit them into this file.
 
@@ -16,7 +16,6 @@ Substitute as you go, or edit them into this file.
 | `BOX_USER` | Your user on the box | `whoami` over SSH |
 | `DB_PASSWORD` | Password for the Postgres `clubsync` role | You choose it in Step 2 |
 | `TUNNEL_UUID` | Cloudflare tunnel ID | Printed by Step 5 |
-| `B2_FRIENDLY_HOST` | The `fXXX.backblazeb2.com` host | Step 13. **Not** the `B2_ENDPOINT` in `.env` — that's the S3 host |
 
 Confirm before you touch anything:
 
@@ -121,7 +120,7 @@ This is the first point where Gemini, Apify, B2 and Discord are exercised togeth
 
 ### Step 4b — Rekey any image written before C0 landed
 
-Only needed if a run happened while the box was still on the old code — i.e. if Step 4 ran once before `docker compose build` picked up C0. Those rows hold a bare `<sha256>` key that Cloudflare can never edge-cache, and on a fresh prod bucket the key is permanent, so this is the only chance to fix it.
+Only needed if a run happened while the box was still on the old code — i.e. if Step 4 ran once before `docker compose build` picked up C0. Those rows hold a bare `<sha256>` key, which the image host will never serve: the Worker only accepts `<sha256>.webp` (Step 16). On a fresh prod bucket the key is permanent, so this is the only chance to fix it.
 
 ```bash
 docker compose exec app bin/rails clubsync:rekey_images DRY_RUN=true   # preview, touches nothing
@@ -299,67 +298,86 @@ Do not create a second check.
 
 ## Phase 4 — The image host (Track C)
 
-Independent of the tunnel and the app — pure Cloudflare config. Needed before the deferred public pages, not before the deploy. Safe to run any time, including while Phase 3 is pending. Per [Backblaze's walkthrough](https://www.backblaze.com/blog/free-image-hosting-with-cloudflare-transform-rules-and-backblaze-b2/) — no app route, no Ruby. Images go browser → Cloudflare → B2 and never touch the box.
+Independent of the tunnel and the app: a Cloudflare Worker reading a **private** B2 bucket. Needed before the deferred public pages, not before the deploy. Safe to run any time, including while Phase 3 is pending. Images go browser → Cloudflare → Worker → B2 and never touch the box.
 
-### Step 13 — Bucket is public
+**The bucket stays private.** Making a B2 bucket public requires a payment method on file, which is the one thing this account is avoiding; Workers and B2 application keys are both card-free. The Worker signs reads with a read-only key restricted to that one bucket, and only ever asks B2 for a path matching `^/[a-f0-9]{64}\.webp$` — so the credential at the edge cannot be pointed at anything else. See `docs/adr/2026-09-30-private-b2-behind-a-cloudflare-worker.md`.
 
-Backblaze → Buckets → your bucket → **Public**. Note the **friendly** hostname from a file's details (`fXXX.backblazeb2.com`) — that's `B2_FRIENDLY_HOST`. **Do not use `B2_ENDPOINT`** from `.env`: that reads `https://s3.us-west-004.backblazeb2.com`, the S3-compatible API host, and the Step 15 rewrite prepends `/file/<bucket>`, which only makes sense against the friendly host.
+Steps 13–15 run on **your machine** (in this checkout), not on the box. Step 16 verifies from anywhere.
 
-### Step 14 — DNS
+### Step 13 — B2 read key · **do not paste these anywhere**
 
-DNS → Add record: CNAME, name `files`, target `B2_FRIENDLY_HOST`.
+Backblaze → **App Keys → Add Key**:
 
-**Confirm the record is proxied (orange cloud), not DNS-only.** New CNAMEs default to proxied, so it usually is — but check, because nothing else in this track will tell you. Grey means Cloudflare isn't in the request path: no Transform Rules, no cache-control rewrite, no ETag, no CORS, no path rewrite. Raw B2 responses, uncached, and every page view spends a Class B transaction. **The entire reason this track exists is the orange cloud.**
+- **Name:** `clubsync-image-proxy-read`
+- **Capabilities:** `Read Files` **only**
+- **Bucket restriction:** restrict to this one bucket. Include `Read Bucket` too — on a cache miss the Worker issues a `HEAD` to check existence, which needs bucket-level read
+- **TTL:** leave empty (non-expiring)
 
-**Expect a 522 right now** — Cloudflare fetches upstream over plain HTTP by default and B2 is HTTPS-only. That is the article's intended intermediate state, not a failure.
+**Leave the bucket itself private.** Nothing in this step sets it to Public.
 
-⚠️ **Do not "fix" the 522 by turning the proxy off.** It is the natural reflex and the one move that destroys this track permanently and invisibly: the 522 goes away and so does the edge caching. The real fix is Step 15.
+⚠️ **The application key is shown exactly once.** Copy it somewhere you will paste from locally (a password manager) — not chat, not an issue, not the repo. Never reuse `B2_KEY_ID`/`B2_APPLICATION_KEY` from `.env`: those are the app's upload key, and a copy-paste between the two is a silent privilege upgrade that also breaks rotation.
 
-### Step 15 — SSL mode, SXG, and the four Transform Rules
+You need four values: key ID, application key, bucket name, S3 endpoint, region. The last three already exist in `.env` as `B2_BUCKET`, `B2_ENDPOINT`, `B2_REGION` — copy them into `wrangler.toml`.
 
-**SSL/TLS → Overview → encryption mode: confirm `Full (strict)` or `Full`, not `Flexible`.** Flexible is what causes the 522.
+### Step 14 — Configure, test locally, deploy
 
-⚠️ *Before changing anything, look at what it's already set to. The apex returned 526 (invalid origin cert) before the tunnel was cut over, and a 526 is only possible when Cloudflare validates the origin cert — which Flexible never does. So the zone is most likely already at Full/Full(strict) and there may be nothing to change. Also note the blast radius is smaller than it looks: zone SSL mode does not govern the apex at all, because a tunnel's edge→origin hop is the tunnel's own encrypted channel. It matters only for the `files.` → B2 CNAME, so it cannot be the reason `cyberjayahappenings.me` misbehaves.*
+```bash
+cd workers/image-proxy
+npm install
 
-**Settings → Auto Minify / SXG: turn OFF Automatic Signed Exchanges.** SXG is incompatible with B2 and breaks in some browsers.
+cp .dev.vars.example .dev.vars    # then paste the key ID and application key into it
+npm test                          # 30 vitest cases, no network — always run this
 
-**Rules → Transform Rules**, four rules in this order. The free plan allows 10.
+npx wrangler dev                  # optional: serve locally against the real bucket
+npx wrangler login                # browser OAuth, or use a scoped API token via CLOUDFLARE_API_TOKEN
+npx wrangler secret put B2_READ_KEY_ID
+npx wrangler secret put B2_READ_APP_KEY   # paste; not echoed, not in shell history
+npx wrangler deploy
+```
 
-1. **Rewrite URL** — condition `not starts_with(http.request.uri.path, "/file/<bucket>")` (so short and long URLs both work), dynamic **rewrite** with expression `concat("/file/<bucket>", http.request.uri.path)`
-2. **Modify response header** — set `ETag` to `concat(http.response.headers["x-bz-content-sha1"][0], http.response.headers["x-bz-info-src_last_modified_millis"][0], http.response.headers["x-bz-file-id"][0])` and remove the `x-bz-*` headers. The `[0]` indexes are required (header values are arrays). If all three are absent the ETag is empty and Cloudflare omits the header — which is what you want
-3. **Modify response header** — set `cache-control` to `public, max-age=31536000`, matching on the existing `max-age=14400` so B2's `no-store` on 404s passes through untouched
-4. **CORS** — set `Access-Control-Allow-Origin: *`, matching on `.webp` (everything in B2 is WebP; add others defensively if you ever serve a raw upload)
+Check the three non-secret values in `wrangler.toml` against your `.env` before deploying: `B2_BUCKET`, `B2_REGION`, and `B2_ENDPOINT` — which must be the **S3-compatible** host (`https://s3.<region>.backblazeb2.com`), not the friendly `fXXX` host. A wrong one is a 502 at the edge rather than an error in the app.
 
-Two notes so these don't read as arbitrary:
+`secret put` is per-environment. If the Worker is later run in production mode, set both secrets again with `npx wrangler secret put --env production`.
 
-- **The year-long TTL in rule 3 is correct, not optimistic.** The article warns it "effectively assumes once created, files on the image host are immutable." Keys are `SHA256(bytes)` plus a constant extension suffix, so the same key can never hold different content — and that guarantee is what makes repeat views free.
-- **Rule 4 matches the URL path extension, not the bytes.** The key has to end in `.webp` for the rule to fire. C0 in the plan is what makes that true — apply it before C1, or this rule never fires.
+`workers_dev = false` is deliberate: the Cache API only works on a Cloudflare-attached domain, so testing through `*.workers.dev` would appear to work while every request silently missed the cache.
 
-The most common mistake here is referencing `http.response.headers` in a rule that means request headers, or vice versa.
+### Step 15 — Confirm the custom domain · **STOP GATE**
 
-**Know about this now, though it bites later:** the free plan's **Bot Fight Mode** and **Security Level** can serve a JavaScript challenge to a non-browser client. Nothing in this deploy is affected — healthchecks.io pings `hc-ping.com` directly and never touches Cloudflare — but the *deferred* public uptime monitor, pointed at `cyberjayahappenings.me`, would get challenged, and that presents as a mysterious Rails error rather than a Cloudflare one.
+`wrangler.toml` carries the route, so **the first deploy creates the `files` DNS record automatically** — there is no CNAME to add by hand.
+
+Check it in the dashboard:
+
+- **Workers & Pages → `image-proxy` → Settings → Domains** shows `files.cyberjayahappenings.me` as **Active**
+- **DNS → Records** has a proxied `files` record (orange cloud). A custom-domain Worker needs it proxied — grey means Cloudflare is not in the request path at all
+
+No SSL/TLS mode change, and no Signed Exchanges setting: the Worker→B2 hop is its own signed HTTPS request from Cloudflare's edge, and neither zone setting governs it.
 
 ### Step 16 — Verify · **STOP GATE**
 
-Copy a real key from the B2 file list rather than computing a hash, so you're testing an object that definitely exists:
+Take a real rekeyed key from the B2 file list (they end in `.webp` after Step 4b) rather than computing a hash, so you are testing an object that definitely exists:
 
 ```bash
-curl --head https://files.cyberjayahappenings.me/<sha256>.webp
-curl --head https://files.cyberjayahappenings.me/<sha256>.webp   # again
+curl -sI https://files.cyberjayahappenings.me/<sha256>.webp
+curl -sI https://files.cyberjayahappenings.me/<sha256>.webp   # again
 ```
 
-**On the second call, expect:** `cf-cache-status: HIT` — the whole point, and the direct evidence that repeat views have stopped spending B2's 2,500/day free Class B transactions · `cache-control: public, max-age=31536000` · no `x-bz-*` headers · an `etag`. A 404 should show `BYPASS`, not `HIT`.
+**On the second call, expect:** `x-cache: HIT` — the Worker's own header, and the direct evidence that repeat views have stopped spending B2's Class B transactions · `cache-control: public, max-age=31536000, immutable` · `content-type: image/webp` · an `etag` · no `x-amz-*` or `x-bz-*` headers.
 
-| `cf-cache-status` | Meaning | Where to look |
+**Read `x-cache`, not `cf-cache-status`.** `cf-cache-status` is not reliable for a response served out of the Cache API, and it will mislead you.
+
+| What you see | Meaning | Where to look |
 |---|---|---|
-| `HIT` on the second call | Working. Stop here | — |
-| `MISS` on the second call | Eligible, but not being stored | Rule 3's match expression |
-| `DYNAMIC` | Never eligible — didn't even try | The key's extension |
-| `BYPASS` on a 404 | Expected. B2's `no-store` passing through | — |
+| `x-cache: HIT` on the second call | Working. Stop here | — |
+| `x-cache: MISS` on both calls | Serving, but nothing is being stored | Cache API unavailable — almost always a DNS-only record or a `workers.dev` URL |
+| `502` | B2 refused or failed the signed request | `npx wrangler tail`, then the `B2_*` vars and the two secrets |
+| `502` for an image the app shows fine | The Worker reads the same private bucket with a *different* credential | Confirm `B2_READ_*` is the Step 13 key, not the upload key |
+| `404` for a key you can see in B2 | Extensionless key (written before Step 4b), or the object is genuinely absent | Step 4b |
+| `404` on `/nope` | Correct — the path regex rejects it before any B2 call | — |
+| `405` on `POST /<key>.webp` | Correct — only GET/HEAD are served | — |
 
-`DYNAMIC` is the one that wastes the most time: Cloudflare never considered the asset cacheable *at request time*, so no Transform Rule can fix it after the fact. [Default cache behavior](https://developers.cloudflare.com/cache/concepts/default-cache-behavior/) matches on extension and explicitly *not* on MIME type, so a bare `<sha256>` is never cacheable however the bytes are labelled. The extension fix is already in `ObjectStore#put`; a DYNAMIC here means something upstream of it didn't land.
+Then confirm the app itself is untouched: `curl -sI https://cyberjayahappenings.me/up` still returns `200`.
 
-### Step 17 — Point the app at the CDN
+### Step 17 — Point the app at the Worker
 
 Only after Step 16 passes:
 
@@ -368,8 +386,9 @@ echo 'PUBLIC_IMAGE_BASE_URL=https://files.cyberjayahappenings.me' >> $APP_ROOT/.
 cd $APP_ROOT && docker compose up -d
 ```
 
-`get_url` prefers this and falls back to the raw B2 URL when blank, so nothing breaks if you skip it — you just pay B2 for every page view.
+`get_url` prefers this and falls back to the raw B2 URL when blank, so nothing breaks if you skip it — you just get URLs no browser can load, because the bucket is private.
 
+---
 ---
 
 ## When something breaks
@@ -385,10 +404,10 @@ cd $APP_ROOT && docker compose up -d
 | Cloudflared service starts, no tunnel | `credentials-file` still points at a home directory, or `--config` was omitted in Step 8 |
 | Cron never runs, `cron.log` empty | `whenever` ran in the container, or `APP_ROOT` is wrong, or `docker` isn't at the path in `schedule.rb` |
 | healthchecks "missed ping" despite runs | Cron time and healthchecks period disagree — Steps 10 and 12 are one decision |
-| `files.…` returns 522 | Expected between Steps 14 and 15 |
-| `cf-cache-status: MISS` on repeat requests | Rule 3's match expression isn't matching |
-| `cf-cache-status: DYNAMIC` | The key has no extension. Never cacheable at request time, so no Transform Rule can fix it |
-| `files.…` 404s for keys you can see in B2 | Key sent without `.webp`, or the `files.` record is DNS-only |
+| `files.…` 502s | The Worker reached B2 and was refused — `npx wrangler tail`, then the `B2_*` vars and the two secrets (Steps 13–14) |
+| `x-cache: MISS` on repeat requests | The Cache API isn't storing. Almost always a DNS-only `files.` record, or you tested via `workers.dev` (Steps 14–15) |
+| `files.…` 404s for keys you can see in B2 | The key is extensionless (written before Step 4b), so the Worker's path regex rejects it |
+| `files.…` returns HTML or a challenge | Bot Fight Mode / Security Level serving a non-browser client a challenge. The deferred uptime monitor would hit this; `curl -sI` from a script should not |
 | App edits have no effect | No bind mount any more. `docker compose up -d --build` |
 
 ## Two things to do once, later
