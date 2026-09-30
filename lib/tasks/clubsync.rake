@@ -94,6 +94,10 @@ namespace :clubsync do
 
     result.failures.each { |failure| puts "FAILED  #{failure}" }
     puts result.summary
+    # A partial pass re-running clean is normal (it is idempotent, which is how a
+    # cap or a crash gets recovered), but it is not a pass that succeeded —
+    # a zero exit here would make a scheduled wrapper call it done.
+    abort "#{result.failures.size} row(s) failed — rerun the task to finish them" if result.failures.any?
   end
 
   desc "Dump the dev database for recovery (content backup; image bytes already persist in B2)"

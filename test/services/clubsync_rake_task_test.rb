@@ -50,34 +50,58 @@ class ClubsyncRakeTaskTest < ActiveSupport::TestCase
   end
 
   test "clubsync:rekey_images delegates to ImageRekeyer and honours DRY_RUN" do
-    Rails.application.load_tasks
     image = create_image("c" * 64)
     seen = []
-    original = ImageRekeyer.method(:call)
-    ImageRekeyer.define_singleton_method(:call) do |dry_run: false, logger: nil, **|
-      seen << dry_run
-      ImageRekeyer::Result.new(planned: [], rekeyed: [], failures: [], already_keyed: 1, dry_run: dry_run)
-    end
-
-    with_env("DRY_RUN" => "true") do
-      # Every test in this class calls load_tasks, and each call appends another
-      # action to the same task object, so invoke would otherwise run the body
-      # once per test that has loaded tasks so far. Keep exactly one.
-      task = Rake::Task["clubsync:rekey_images"]
-      action = task.actions.first
-      task.clear_actions
-      task.actions << action
-      task.reenable
-      task.invoke
+    stub_rekeyer(seen: seen) do
+      with_env("DRY_RUN" => "true") { invoke_rekey_images }
     end
 
     assert_equal [ true ], seen
     assert_equal "c" * 64, image.reload.b2_key
+  end
+
+  test "clubsync:rekey_images exits non-zero when rows failed, so a partial pass isn't read as success" do
+    image = create_image("d" * 64)
+    failure = ImageRekeyer::Failure.new(image: image, new_key: "#{'d' * 64}.webp", error: "copy failed")
+
+    stub_rekeyer(failures: [ failure ]) do
+      assert_raises(SystemExit) { invoke_rekey_images }
+    end
+  end
+
+  test "clubsync:rekey_images exits zero when nothing failed" do
+    stub_rekeyer(rekeyed: [ "a.webp" ]) do
+      invoke_rekey_images
+    end
+  end
+
+  private
+
+  def stub_rekeyer(seen: [], rekeyed: [], failures: [])
+    original = ImageRekeyer.method(:call)
+    ImageRekeyer.define_singleton_method(:call) do |dry_run: false, logger: nil, **|
+      seen << dry_run
+      ImageRekeyer::Result.new(
+        planned: [], rekeyed: rekeyed, failures: failures, already_keyed: 0, dry_run: dry_run
+      )
+    end
+    yield
   ensure
     ImageRekeyer.define_singleton_method(:call, original)
   end
 
-  private
+  def invoke_rekey_images
+    Rails.application.load_tasks
+    # Every test in this class calls load_tasks, and each call appends another
+    # action to the same task object, so invoke would otherwise run the body
+    # once per test that has loaded tasks so far. Keep exactly one.
+    task = Rake::Task["clubsync:rekey_images"]
+    action = task.actions.first
+    task.clear_actions
+    task.actions << action
+    task.reenable
+    task.invoke
+  end
 
   def with_env(pairs)
     original = pairs.keys.index_with { |key| ENV[key] }

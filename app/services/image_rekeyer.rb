@@ -46,7 +46,9 @@ class ImageRekeyer
         outcome = rekey(image, new_key)
         outcome == :ok ? rekeyed << new_key : failures << outcome
       end
-      report(index + 1, planned.size, failures.size) if ((index + 1) % PROGRESS_EVERY).zero?
+      # Nothing is processed in a dry run, so a "processed N/M" line there would
+      # be a count of iterations, not of work done.
+      report(index + 1, planned.size, failures.size) if !@dry_run && ((index + 1) % PROGRESS_EVERY).zero?
     end
 
     Result.new(
@@ -91,7 +93,7 @@ class ImageRekeyer
     failures = []
     already_keyed = 0
 
-    Image.order(:id).find_each do |image|
+    Image.find_each do |image|
       extension = extension_for(image.content_type)
       if extension.nil?
         failures << Failure.new(image: image, new_key: image.b2_key,

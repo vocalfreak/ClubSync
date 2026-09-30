@@ -19,18 +19,21 @@ class ObjectStoreTest < ActiveSupport::TestCase
   end
 
   class FakeS3
-    attr_reader :put_objects, :copy_objects
+    attr_reader :put_objects, :copy_objects, :reads, :heads
 
     def initialize(body = "", existing: [])
       @body = body
       @existing = existing
       @put_objects = []
       @copy_objects = []
+      @reads = 0
+      @heads = 0
     end
 
     def get_object(bucket:, key:)
       raise ArgumentError, "wrong bucket" unless bucket == "test-bucket"
 
+      @reads += 1
       Struct.new(:body).new(StringIO.new(@body))
     end
 
@@ -47,6 +50,7 @@ class ObjectStoreTest < ActiveSupport::TestCase
     def head_object(bucket:, key:)
       raise Aws::S3::Errors::NotFound.new(nil, "no such key") unless @existing.include?(key)
 
+      @heads += 1
       nil
     end
   end
@@ -133,10 +137,39 @@ class ObjectStoreTest < ActiveSupport::TestCase
     )
   end
 
+  test "copy preserves the source content type by not restating it" do
+    client = FakeS3.new
+    ObjectStore.new(client: client, bucket: "test-bucket").copy("a1b2c3", "a1b2c3.webp")
+
+    # S3 rejects content_type alongside metadata_directive COPY, so preservation
+    # is expressed by the absence of the parameter: the destination inherits
+    # image/webp from the source object rather than being told it.
+    refute_includes client.copy_objects.first.keys, :content_type
+    assert_equal "COPY", client.copy_objects.first[:metadata_directive]
+  end
+
   test "exists? answers from a head rather than a download" do
-    store = ObjectStore.new(client: FakeS3.new(existing: [ "a1b2c3.webp" ]), bucket: "test-bucket")
+    client = FakeS3.new(existing: [ "a1b2c3.webp" ])
+    store = ObjectStore.new(client: client, bucket: "test-bucket")
 
     assert store.exists?("a1b2c3.webp")
-    refute store.exists?("missing.webp")
+    assert_equal 0, client.reads, "a head, not a get"
+  end
+
+  test "exists? is false, not an exception, when the key is missing" do
+    store = ObjectStore.new(client: FakeS3.new, bucket: "test-bucket")
+
+    assert_nothing_raised { assert_equal false, store.exists?("nope.webp") }
+  end
+
+  test "exists? is false on either shape of a not-found response" do
+    [ Aws::S3::Errors::NotFound, Aws::S3::Errors::NoSuchKey ].each do |error|
+      client = Class.new do
+        define_method(:head_object) { |**| raise error.new(nil, "404") }
+      end.new
+      store = ObjectStore.new(client: client, bucket: "test-bucket")
+
+      assert_equal false, store.exists?("a1b2c3.webp"), "#{error} should read as absent"
+    end
   end
 end

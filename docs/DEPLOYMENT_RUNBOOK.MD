@@ -129,7 +129,11 @@ docker compose exec app bin/rails clubsync:rekey_images                  # do it
 docker compose exec app bin/rails clubsync:rekey_images                  # rerun: must report 0 rows to rekey
 ```
 
-Safe to run when it reports `0 rows to rekey` — that is the expected result on a database whose images were all written after C0, and the third command is how you confirm the pass finished. **Don't run it during an ingest**, and note the `.env` came from dev, so the bucket is shared: the task copies and never deletes, because dev's own rows still reference the old keys.
+**947 rows to rekey on the box**: 947 copies (B2 Class C) plus 947 heads (Class B), inside the 2,500/day free allowance for each class — a single pass fits, and the rerun's verification costs only the reads it needs (none: rows already keyed are skipped). If a pass ever does hit a cap, the caps page rejects rather than bills and the next day picks up where it stopped.
+
+The preview command doubles as the check that the image is current: `Don't know how to build task` means `docker compose build app` hasn't landed yet (Step 1).
+
+Safe to run when it reports `0 rows to rekey` — the third command is how you confirm the pass finished, and it exits non-zero if any row failed. **Don't run it during an ingest**, and note the `.env` came from dev, so the bucket is shared: the task copies and never deletes, because dev's own rows still reference the old keys.
 
 ---
 

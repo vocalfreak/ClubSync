@@ -167,6 +167,15 @@ class ImageRekeyerTest < ActiveSupport::TestCase
     assert_match "dry run", result.summary
   end
 
+  test "a dry run reports no rows as processed" do
+    create_image(b2_key: HEX_A, count: 50)
+
+    rekey(dry_run: true)
+
+    assert_equal 12, @log.size, "count, 10 sample rows, the truncated tail"
+    refute @log.any? { |line| line.start_with?("processed") }, "nothing was processed, so nothing should claim to be"
+  end
+
   test "logs progress every 50 rows and names the totals" do
     create_image(b2_key: HEX_A, count: 50)
 
