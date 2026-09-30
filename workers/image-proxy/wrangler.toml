@@ -17,7 +17,7 @@ routes = [
 # nothing -- but they drift, and drift here is a 502 at the edge.
 [vars]
 B2_ENDPOINT = "https://s3.us-west-004.backblazeb2.com"
-B2_BUCKET = "REPLACE_ME"
+B2_BUCKET = "7300f7e629c79699a70f0217"
 B2_REGION = "us-west-004"
 
 # The read-only, single-bucket B2 key lives in Worker secrets, never here:
