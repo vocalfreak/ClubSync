@@ -119,6 +119,18 @@ This is the first point where Gemini, Apify, B2 and Discord are exercised togeth
 
 ✅ **C0 has landed** (2026-09-30) — `ObjectStore#put` derives the key's extension from `content_type`, so this run writes `<sha256>.webp` keys to the fresh prod bucket and every image URL is edge-cacheable once Track C is up. Nothing to do here; keys are permanent on a new bucket, so this is the run where that mattered.
 
+### Step 4b — Rekey any image written before C0 landed
+
+Only needed if a run happened while the box was still on the old code — i.e. if Step 4 ran once before `docker compose build` picked up C0. Those rows hold a bare `<sha256>` key that Cloudflare can never edge-cache, and on a fresh prod bucket the key is permanent, so this is the only chance to fix it.
+
+```bash
+docker compose exec app bin/rails clubsync:rekey_images DRY_RUN=true   # preview, touches nothing
+docker compose exec app bin/rails clubsync:rekey_images                  # do it
+docker compose exec app bin/rails clubsync:rekey_images                  # rerun: must report 0 rows to rekey
+```
+
+Safe to run when it reports `0 rows to rekey` — that is the expected result on a database whose images were all written after C0, and the third command is how you confirm the pass finished. **Don't run it during an ingest**, and note the `.env` came from dev, so the bucket is shared: the task copies and never deletes, because dev's own rows still reference the old keys.
+
 ---
 
 ## Phase 2 — The tunnel

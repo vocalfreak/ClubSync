@@ -48,4 +48,46 @@ class ClubsyncRakeTaskTest < ActiveSupport::TestCase
     Rake::Task["clubsync:extract_one"].reenable
     assert_raises(SystemExit) { Rake::Task["clubsync:extract_one"].invoke("NOSUCHCODE") }
   end
+
+  test "clubsync:rekey_images delegates to ImageRekeyer and honours DRY_RUN" do
+    Rails.application.load_tasks
+    image = create_image("c" * 64)
+    seen = []
+    original = ImageRekeyer.method(:call)
+    ImageRekeyer.define_singleton_method(:call) do |dry_run: false, logger: nil, **|
+      seen << dry_run
+      ImageRekeyer::Result.new(planned: [], rekeyed: [], failures: [], already_keyed: 1, dry_run: dry_run)
+    end
+
+    with_env("DRY_RUN" => "true") do
+      # Every test in this class calls load_tasks, and each call appends another
+      # action to the same task object, so invoke would otherwise run the body
+      # once per test that has loaded tasks so far. Keep exactly one.
+      task = Rake::Task["clubsync:rekey_images"]
+      action = task.actions.first
+      task.clear_actions
+      task.actions << action
+      task.reenable
+      task.invoke
+    end
+
+    assert_equal [ true ], seen
+    assert_equal "c" * 64, image.reload.b2_key
+  ensure
+    ImageRekeyer.define_singleton_method(:call, original)
+  end
+
+  private
+
+  def with_env(pairs)
+    original = pairs.keys.index_with { |key| ENV[key] }
+    pairs.each { |key, value| ENV[key] = value }
+    yield
+  ensure
+    original.each { |key, value| ENV[key] = value }
+  end
+
+  def create_image(b2_key, content_type: "image/webp")
+    Image.create!(post: create(:post), position: 0, b2_key: b2_key, content_type: content_type)
+  end
 end

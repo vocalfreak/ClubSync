@@ -19,11 +19,13 @@ class ObjectStoreTest < ActiveSupport::TestCase
   end
 
   class FakeS3
-    attr_reader :put_objects
+    attr_reader :put_objects, :copy_objects
 
-    def initialize(body = "")
+    def initialize(body = "", existing: [])
       @body = body
+      @existing = existing
       @put_objects = []
+      @copy_objects = []
     end
 
     def get_object(bucket:, key:)
@@ -34,6 +36,17 @@ class ObjectStoreTest < ActiveSupport::TestCase
 
     def put_object(**attrs)
       @put_objects << attrs
+      nil
+    end
+
+    def copy_object(**attrs)
+      @copy_objects << attrs
+      nil
+    end
+
+    def head_object(bucket:, key:)
+      raise Aws::S3::Errors::NotFound.new(nil, "no such key") unless @existing.include?(key)
+
       nil
     end
   end
@@ -106,5 +119,24 @@ class ObjectStoreTest < ActiveSupport::TestCase
 
     assert_includes store.get_url("a1b2c3"), "/test-bucket/"
     refute_includes store.get_url("a1b2c3"), "/env-bucket/"
+  end
+
+  test "copy is a server-side bucket-qualified copy that keeps the source metadata" do
+    client = FakeS3.new
+    store = ObjectStore.new(client: client, bucket: "test-bucket")
+
+    assert_equal "a1b2c3.webp", store.copy("a1b2c3", "a1b2c3.webp")
+    assert_equal 1, client.copy_objects.size
+    assert_equal(
+      { bucket: "test-bucket", key: "a1b2c3.webp", copy_source: "test-bucket/a1b2c3", metadata_directive: "COPY" },
+      client.copy_objects.first
+    )
+  end
+
+  test "exists? answers from a head rather than a download" do
+    store = ObjectStore.new(client: FakeS3.new(existing: [ "a1b2c3.webp" ]), bucket: "test-bucket")
+
+    assert store.exists?("a1b2c3.webp")
+    refute store.exists?("missing.webp")
   end
 end
