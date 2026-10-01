@@ -4,7 +4,7 @@
 
 Companion docs: `docs/MASTER_IMPLEMENTATION_PLAN.md` (phasing), `docs/EXTRACTION_IMPLEMENTATION_PLAN.md` (production of the `events` rows this phase groups), `docs/HEALTH_MONITORING_PLAN.md` (run summary reporting for the new stage). A current-state grounding snapshot lives in `docs/REPO_STATE.md`.
 
-**Status:** not built. No `DHash` implementation, `images.dhash` never populated, no `deduplications` table, no pairwise-matching code. `event_groups` and `events.event_group_id` do not exist yet.
+**Status: built and running.** Landed 2026-09-24, amended the same day (corroborated veto, §4) and 2026-09-25 (series window restored to 30, §4.1). `DHashService` computes `images.dhash` inside `MediaProcessor`'s existing resize/encode step (no backfill); `event_groups` + `events.event_group_id` exist (migrations `20260923000003`/`4`); `deduplications` exists (created as `dedup_decisions`, renamed `20260925000001`, with `series` added `20260924000001` and `weighted_score` relaxed nullable `20260924000002`); scoring, complete-link clustering and run-level wiring live in `app/services/deduplicator.rb` (signals in `CaptionJaccard` / `CosineSimilarity`). Verified on dev: 36 posts at the terminal `deduped` stage. Remaining: only the Phase 5 admin/review surface, which reads these rows.
 
 ---
 
