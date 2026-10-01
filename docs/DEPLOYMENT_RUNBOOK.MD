@@ -2,7 +2,7 @@
 
 Ordered, copy-pasteable. `DEPLOYMENT_IMPLEMENTATION_PLAN.MD` is *why* each step exists; this file is *what to type*, in order, with a stop-gate at each risky point. Read it once before starting — do not run steps out of order, because out-of-order failures are ambiguous.
 
-**State:** A1 (repo fixes) done and verified locally. B1–B3 done (domain `cyberjayahappenings.me`, Cloudflare zone **Active**). Everything below is unticked. C0 — the image-key extension fix, plus the one-off rekey — is **code-merged but not yet run on the box**; run Step 4b after Step 4 if a run predates the rebuild.
+**State:** A1 (repo fixes) done and verified locally. B1–B3 done (domain `cyberjayahappenings.me`, Cloudflare zone **Active**). Everything below is unticked. C0 — the image-key extension fix — landed 2026-09-30, and the one-off rekey (Step 4b) has already run on the box: **316 rows rekeyed, 5 junk rows failed**. No live rekey step remains.
 
 ---
 
@@ -118,21 +118,9 @@ This is the first point where Gemini, Apify, B2 and Discord are exercised togeth
 
 ✅ **C0 has landed** (2026-09-30) — `ObjectStore#put` derives the key's extension from `content_type`, so this run writes `<sha256>.webp` keys to the fresh prod bucket and every image URL is edge-cacheable once Track C is up. Nothing to do here; keys are permanent on a new bucket, so this is the run where that mattered.
 
-### Step 4b — Rekey any image written before C0 landed
+### Step 4b — Rekey completed (2026-09-30)
 
-Only needed if a run happened while the box was still on the old code — i.e. if Step 4 ran once before `docker compose build` picked up C0. Those rows hold a bare `<sha256>` key, which the image host will never serve: the Worker only accepts `<sha256>.webp` (Step 16). On a fresh prod bucket the key is permanent, so this is the only chance to fix it.
-
-```bash
-docker compose exec app bin/rails clubsync:rekey_images DRY_RUN=true   # preview, touches nothing
-docker compose exec app bin/rails clubsync:rekey_images                  # do it
-docker compose exec app bin/rails clubsync:rekey_images                  # rerun: must report 0 rows to rekey
-```
-
-**947 rows to rekey on the box**: 947 copies (B2 Class C) plus 947 heads (Class B), inside the 2,500/day free allowance for each class — a single pass fits, and the rerun's verification costs only the reads it needs (none: rows already keyed are skipped). If a pass ever does hit a cap, the caps page rejects rather than bills and the next day picks up where it stopped.
-
-The preview command doubles as the check that the image is current: `Don't know how to build task` means `docker compose build app` hasn't landed yet (Step 1).
-
-Safe to run when it reports `0 rows to rekey` — the third command is how you confirm the pass finished, and it exits non-zero if any row failed. **Don't run it during an ingest**, and note the `.env` came from dev, so the bucket is shared: the task copies and never deletes, because dev's own rows still reference the old keys.
+The one-off rekey of images written before C0 landed ran on 2026-09-30. **316 rows rekeyed, 5 failed** (the failures were the pre-existing junk rows with nil byte sizes: `k`, `kA1`, `kA2`, `kB1`, `kB2`, ids 317–321). The task copied each object to `<sha256>.webp` (by content-type) and repointed rows only after a confirming `head_object`. Old extensionless objects remain in B2 and were never deleted. The tooling (`ImageRekeyer`, `clubsync:rekey_images`, `ObjectStore#copy`/`#exists?`) existed at commit `8ab89a171e44018cb17ff7c26b7916faa9d18fae` and was removed in a later cleanup commit; no live rekey is needed going forward.
 
 ---
 
@@ -354,7 +342,7 @@ No SSL/TLS mode change, and no Signed Exchanges setting: the Worker→B2 hop is 
 
 ### Step 16 — Verify · **STOP GATE**
 
-Take a real rekeyed key from the B2 file list (they end in `.webp` after Step 4b) rather than computing a hash, so you are testing an object that definitely exists:
+Take a real rekeyed key from the B2 file list (they end in `.webp`; Step 4b rekeyed them on 2026-09-30) rather than computing a hash, so you are testing an object that definitely exists:
 
 ```bash
 curl -sI https://files.cyberjayahappenings.me/<sha256>.webp
@@ -371,7 +359,7 @@ curl -sI https://files.cyberjayahappenings.me/<sha256>.webp   # again
 | `x-cache: MISS` on both calls | Serving, but nothing is being stored | Cache API unavailable — almost always a DNS-only record or a `workers.dev` URL |
 | `502` | B2 refused or failed the signed request | `npx wrangler tail`, then the `B2_*` vars and the two secrets |
 | `502` for an image the app shows fine | The Worker reads the same private bucket with a *different* credential | Confirm `B2_READ_*` is the Step 13 key, not the upload key |
-| `404` for a key you can see in B2 | Extensionless key (written before Step 4b), or the object is genuinely absent | Step 4b |
+| `404` for a key you can see in B2 | Extensionless key (one of the 5 rows Step 4b could not rekey), or the object is genuinely absent | Re-run nothing — check the row's `b2_key` ends in an extension |
 | `404` on `/nope` | Correct — the path regex rejects it before any B2 call | — |
 | `405` on `POST /<key>.webp` | Correct — only GET/HEAD are served | — |
 
@@ -406,7 +394,7 @@ cd $APP_ROOT && docker compose up -d
 | healthchecks "missed ping" despite runs | Cron time and healthchecks period disagree — Steps 10 and 12 are one decision |
 | `files.…` 502s | The Worker reached B2 and was refused — `npx wrangler tail`, then the `B2_*` vars and the two secrets (Steps 13–14) |
 | `x-cache: MISS` on repeat requests | The Cache API isn't storing. Almost always a DNS-only `files.` record, or you tested via `workers.dev` (Steps 14–15) |
-| `files.…` 404s for keys you can see in B2 | The key is extensionless (written before Step 4b), so the Worker's path regex rejects it |
+| `files.…` 404s for keys you can see in B2 | The key is extensionless — one of the 5 rows Step 4b's rekey could not fix — so the Worker's path regex rejects it |
 | `files.…` returns HTML or a challenge | Bot Fight Mode / Security Level serving a non-browser client a challenge. The deferred uptime monitor would hit this; `curl -sI` from a script should not |
 | App edits have no effect | No bind mount any more. `docker compose up -d --build` |
 
