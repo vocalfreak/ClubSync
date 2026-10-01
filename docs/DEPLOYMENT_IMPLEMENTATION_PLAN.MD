@@ -8,20 +8,20 @@ Self-hosted on the revived Dell Latitude E5440, which also runs ProPro's *stagin
 
 ## 1. Blockers to clear before the first deploy
 
-All six are config, no new code. **4 and 6 are fixed** (A1); 1–3 are `.env` values waiting on the box (A2); 5 is a hostname string waiting on the zone (B5). Evidence that 4 was a real boot failure: `RAILS_ENV=production bin/rails runner` raised `The 'cable' database is not configured for the 'production' environment` on a clean checkout — which also meant the Dockerfile's `assets:precompile`, and therefore the image build, could not succeed.
+All six are config, no new code. **All six are cleared as of 2026-10-01**: 4 and 6 were fixed in A1, 1–3 by the box's `.env` (A2), and 5 by the tunnel ingress (B5). The table is kept as the record of *what* each one was, not as a to-do list. Evidence that 4 was a real boot failure: `RAILS_ENV=production bin/rails runner` raised `The 'cable' database is not configured for the 'production' environment` on a clean checkout — which also meant the Dockerfile's `assets:precompile`, and therefore the image build, could not succeed.
 
 | # | Blocker | Fix | State |
 |---|---|---|---|
-| 1 | No `SECRET_KEY_BASE` — no `credentials.yml.enc`, no `master.key`, not in `.env`. Rails raises on boot. | §3 | A2 |
-| 2 | No `DATABASE_URL` — `config/database.yml:14-16` gives production *only* `url: ENV["DATABASE_URL"]` | `postgres://clubsync:<pw>@db/clubsync_production` — host `db`, not `localhost` | A2 |
-| 3 | No `POSTGRES_PASSWORD` — `docker-compose.yml:36` interpolates `${POSTGRES_PASSWORD}` from the host env, so Postgres gets an empty password | §3 | A2 |
+| 1 | No `SECRET_KEY_BASE` — no `credentials.yml.enc`, no `master.key`, not in `.env`. Rails raises on boot. | §3 | **cleared** (A2) |
+| 2 | No `DATABASE_URL` — `config/database.yml:14-16` gives production *only* `url: ENV["DATABASE_URL"]` | `postgres://clubsync:<pw>@db/clubsync_production` — host `db`, not `localhost` | **cleared** (A2) |
+| 3 | No `POSTGRES_PASSWORD` — `docker-compose.yml:36` interpolates `${POSTGRES_PASSWORD}` from the host env, so Postgres gets an empty password | §3 | **cleared** (A2) |
 | 4 | The solid gems each eager-load a `Record` that calls `connects_to` for a `:cache`/`:queue`/`:cable` database `config/database.yml` doesn't define. Boot failure, and `entrypoint.sh` runs `db:prepare` on every start. | §2.2 — removed the gems, not just the config | **fixed** |
-| 5 | Compose publishes host **3010**; the tunnel ingress said `localhost:3000` | `localhost:3010` — §5 | B5 |
+| 5 | Compose publishes host **3010**; the tunnel ingress said `localhost:3000` | `localhost:3010` — §5 | **cleared** (B5) |
 | 6 | `volumes: - .:/app` shadows the image's precompiled `public/assets` (gitignored, absent on the host) → every CSS/JS request 404s | §2.1 | **fixed** |
 
 ## 2. Docker Compose
 
-The one line that matters: `127.0.0.1:<host>:3000`, never `0.0.0.0` or bare. Loopback means `cloudflared` is the only way in from outside the box — the entire point of a tunnel, and easy to lose to a copy-paste.
+The one line that matters: `127.0.0.1:3010:3000`, never `0.0.0.0` or bare. Loopback means `cloudflared` is the only way in from outside the box — the entire point of a tunnel, and easy to lose to a copy-paste.
 
 ### 2.1 Committed file vs. the original sketch
 
@@ -157,7 +157,7 @@ Also noted, not decided: the public index shape (recommend upcoming-first with p
 
 ## 9. Order of operations & worklist
 
-**Three parallel tracks, not a sequence.** Nameserver propagation — the one step whose pace wasn't yours — is finished, so the work is B4–B8 and A2–A7, with Track C (committed Worker, unblocks nothing here) floating free alongside either.
+**All three tracks are complete as of 2026-10-01.** The plan below is kept as the record of how the deploy was sequenced, and as the re-run path if the box is ever rebuilt — every item is ticked, and the runbook (`docs/DEPLOYMENT_RUNBOOK.MD`) remains the copy-pasteable version.
 
 The app work goes first *within* the parallel stretch, for a debugging reason rather than a dependency one: if the tunnel test fails and you haven't proven the origin, you have three candidate causes — DNS, tunnel routing, or the app. If `/up` already returns 200 on loopback, it has exactly one. Same argument the master plan makes in the other direction, applied to ordering.
 
@@ -168,22 +168,22 @@ The app work goes first *within* the parallel stretch, for a debugging reason ra
 - [x] **B1** **DONE** — domain is `cyberjayahappenings.me`, claimed via the GitHub Student Pack (Namecheap).
 - [x] **B2** **DONE** — Cloudflare account (free) created, domain added as a zone. Established by the zone reaching Active, only possible once Cloudflare is authoritative.
 - [x] **B3** **DONE** — Namecheap custom nameservers set to Cloudflare's two, propagation finished. **This was the wait; it gated B5.**
-- [ ] **B4** `cloudflared tunnel login` && `cloudflared tunnel create clubsync` · §5
-- [ ] **B5** `cloudflared tunnel route dns --overwrite-dns clubsync cyberjayahappenings.me` · §5 — the flag is required; the apex already had records
-- [ ] **B5b** Cloudflare UI only, no tunnel or `config.hosts` change: ensure a proxied `www` record exists (if the old ones are gone, an `AAAA` to `100::` is enough), then a Redirect Rule — host equals `www.cyberjayahappenings.me`, dynamic target `concat("https://cyberjayahappenings.me", http.request.uri.path)`, 301, preserve query string. Test with 302 first, then switch to 301. Verify with `curl -I https://www.cyberjayahappenings.me/anything` and check `location:` preserves the path
-- [ ] **B6** Write `/etc/cloudflared/config.yml` with ingress → `http://localhost:3010` · §5
-- [ ] **B7** `sudo cloudflared --config /etc/cloudflared/config.yml service install` && `sudo systemctl enable --now cloudflared` · §5
-- [ ] **B8** `curl -I https://cyberjayahappenings.me/up` → 200
+- [x] **B4** **DONE** — `cloudflared tunnel login` && `cloudflared tunnel create clubsync` · §5
+- [x] **B5** **DONE** — `cloudflared tunnel route dns --overwrite-dns clubsync cyberjayahappenings.me` · §5 — the flag is required; the apex already had records. The tunnel appears in the dashboard under **Zero Trust → Networks → Tunnels**
+- [x] **B5b** **DONE** — Cloudflare UI only, no tunnel or `config.hosts` change: ensure a proxied `www` record exists (if the old ones are gone, an `AAAA` to `100::` is enough), then a Redirect Rule — host equals `www.cyberjayahappenings.me`, dynamic target `concat("https://cyberjayahappenings.me", http.request.uri.path)`, 301, preserve query string. Test with 302 first, then switch to 301. Verify with `curl -I https://www.cyberjayahappenings.me/anything` and check `location:` preserves the path
+- [x] **B6** **DONE** — Write `/etc/cloudflared/config.yml` with ingress → `http://localhost:3010` · §5
+- [x] **B7** **DONE** — `sudo cloudflared --config /etc/cloudflared/config.yml service install` && `sudo systemctl enable --now cloudflared` · §5
+- [x] **B8** **DONE** — `curl -I https://cyberjayahappenings.me/up` → **200** (verified 2026-10-01, and again after the Track C work — the tunnel is upstream of the image host, not affected by it)
 
 ### Track A — app · A1 is ours, A2–A7 are yours on the box
 
 - [x] **A1** Repo fixes — the six blockers in §1, expanded below. **DONE**, verified locally: production boot, `assets:precompile`, rubocop, 277 tests / 1175 assertions green. The Docker *image build* is the one unverified piece — no Docker in the WSL session, so it has to run on the box (A4)
-- [ ] **A2** On the E5440, add to `.env`: `SECRET_KEY_BASE` (`bin/rails secret`), `POSTGRES_PASSWORD`, `DATABASE_URL` (`postgres://clubsync:<pw>@db/clubsync_production` — host `db`, not `localhost`), and `DISCORD_ALERT_WEBHOOK_URL` (empty today, so Gemini-outage alerts are silently dropped). Then `chmod 600` on `.env`, `.env.development`, `.env.test`. · §3, §6
-- [ ] **A3** `scp` `.env` over Tailscale
-- [ ] **A4** `docker compose up -d`, then `curl -I http://127.0.0.1:3010/up` → 200. **If this doesn't work, stop** — nothing downstream matters yet
-- [ ] **A5** `docker compose exec app bin/rails clubsync:ingest` by hand; confirm a healthchecks ping landed and the run summary reached `#clubsync-log` · §6
-- [ ] **A6** `whenever --update-crontab` on the host · §4
-- [ ] **A7** healthchecks.io: **the check already exists** — a live `hc-ping.com` UUID is in `.env`. Verify period 2d / grace 1h and add the Discord integration → `#clubsync-alerts`. Don't create a second check. · §6
+- [x] **A2** **DONE** — On the E5440, add to `.env`: `SECRET_KEY_BASE` (`bin/rails secret`), `POSTGRES_PASSWORD`, `DATABASE_URL` (`postgres://clubsync:<pw>@db/clubsync_production` — host `db`, not `localhost`), and `DISCORD_ALERT_WEBHOOK_URL` (empty today, so Gemini-outage alerts are silently dropped). Then `chmod 600` on `.env`, `.env.development`, `.env.test`. · §3, §6
+- [x] **A3** **DONE** — `scp` `.env` over Tailscale
+- [x] **A4** **DONE** — `docker compose up -d`, then `curl -I http://127.0.0.1:3010/up` → 200 — confirmed transitively by B8: a public 200 can only come through the tunnel's ingress to this port. **If this doesn't work, stop** — nothing downstream matters yet
+- [x] **A5** **DONE** — `docker compose exec app bin/rails clubsync:ingest` by hand; healthchecks ping and the `#clubsync-log` run summary both confirmed · §6
+- [x] **A6** **DONE** — `whenever --update-crontab` on the host · §4
+- [x] **A7** **DONE** — healthchecks.io: **the check already exists** — a live `hc-ping.com` UUID is in `.env`. Verify period 2d / grace 1h and add the Discord integration → `#clubsync-alerts`. Don't create a second check. · §6
 
 #### A1 expanded — repo changes
 
@@ -215,13 +215,13 @@ One future cliff: the Student Pack domain is free for the first year, and the tu
 **Limits to remember (verify at signup).** Workers free plan: about 100,000 requests a day and a small CPU budget per request. Every image request runs the Worker, including cache hits — that per-request cost is what the Transform Rules approach would not have had. The Cache API only works on a Cloudflare-attached domain, not `*.workers.dev`, so `workers_dev = false` and the Worker is bound to `files.` and never tested through `workers.dev`.
 
 - [x] **C0** `ObjectStore#put` derives the extension from `content_type` (`EXTENSIONS`, with a `.bin` fallback). The one-off rekey of pre-existing extensionless rows ran on the box on 2026-09-30 (runbook Step 4b: 316 rekeyed, 5 junk rows failed) and its tooling was removed under C8. Old objects left in place deliberately — the `.env` came from dev and dev's rows still reference them
-- [ ] **C1** *(human, B2)* Create an **application key**: read-only, restricted to this one bucket, no other capabilities. Do not reuse the app's upload key. Leave the bucket **private**. Note the key ID, the application key, the S3 endpoint and the region. Never paste these into chat, an issue, or the repo. B2 shows the key only at creation
-- [ ] **C2** *(agent)* The Worker in `workers/image-proxy/`: validates the path against `^/[a-f0-9]{64}\.webp$`, accepts only `GET` and `HEAD` (405 otherwise), checks the edge cache, on a miss fetches from B2 with a SigV4-signed request via `aws4fetch` (service `s3`, region from config), and returns clean headers (`Cache-Control: public, max-age=31536000, immutable`, `Content-Type`, `ETag`, `Access-Control-Allow-Origin: *`, and an `x-cache: HIT|MISS` header so C6 can verify). No `x-amz-*` or other B2 headers pass through. Secrets are Worker secrets, never code. B2 404 → 404 with `public, max-age=60`; B2 403/5xx or a network error → 502 `no-store`, logging the status and never the signature
-- [ ] **C3** *(agent)* Tests for the handler with injected `fetch`, cache and signer: bad paths, wrong method, HEAD, hit, miss-then-store, B2 404/403/5xx, header whitelist, query string ignored, network failure. `workers/` in `.dockerignore`; `node_modules/`, `.wrangler/`, `.dev.vars` in `.gitignore`; a committed `.dev.vars.example`. A `test_workers` CI job. Update the runbook
-- [ ] **C4** *(human, dev machine)* Authenticate `wrangler` (browser login, or a scoped API token). Set the two secrets with `wrangler secret put`, one at a time: `B2_READ_KEY_ID`, `B2_READ_APP_KEY`. Deploy. **The custom domain route creates the `files` DNS record automatically**
-- [ ] **C5** *(human, Cloudflare)* Confirm `files.cyberjayahappenings.me` shows as a Worker custom domain in the dashboard (Workers & Pages → the Worker → Settings → Domains), and that a proxied `files` DNS record exists
-- [x] **C6** Verify: `curl -sI https://files.cyberjayahappenings.me/<key>.webp` twice, with a real rekeyed key. **The second response must show `x-cache: HIT` — the Worker's own header, not `cf-cache-status`,** which is not reliable for a response served out of the Cache API. Confirm `cache-control: public, max-age=31536000, immutable`, `content-type: image/webp`, an `etag`, and no `x-amz-*`/`x-bz-*`. A malformed path returns 404, a `POST` returns 405, and a well-formed key that does not exist returns 404 with `cache-control: public, max-age=60`. The apex `/up` still returns 200
-- [ ] **C7** Set `PUBLIC_IMAGE_BASE_URL=https://files.cyberjayahappenings.me` in `.env` on the box, and restart the app · §3
+- [x] **C1** *(human, B2)* **DONE** — **application key** created: read-only, restricted to this one bucket, no other capabilities. Do not reuse the app's upload key. Leave the bucket **private**. Note the key ID, the application key, the S3 endpoint and the region. Never paste these into chat, an issue, or the repo. B2 shows the key only at creation
+- [x] **C2** **DONE** — The Worker in `workers/image-proxy/`: validates the path against `^/[a-f0-9]{64}\.webp$`, accepts only `GET` and `HEAD` (405 otherwise), checks the edge cache, on a miss fetches from B2 with a SigV4-signed request via `aws4fetch` (service `s3`, region from config), and returns clean headers (`Cache-Control: public, max-age=31536000, immutable`, `Content-Type`, `ETag`, `Access-Control-Allow-Origin: *`, and an `x-cache: HIT|MISS` header so C6 can verify). No `x-amz-*` or other B2 headers pass through. Secrets are Worker secrets, never code. B2 404 → 404 with `public, max-age=60`; B2 403/5xx or a network error → 502 `no-store`, logging the status and never the signature
+- [x] **C3** **DONE** — Tests for the handler with injected `fetch`, cache and signer: bad paths, wrong method, HEAD, hit, miss-then-store, B2 404/403/5xx, header whitelist, query string ignored, network failure. `workers/` in `.dockerignore`; `node_modules/`, `.wrangler/`, `.dev.vars` in `.gitignore`; a committed `.dev.vars.example`. A `test_workers` CI job. Update the runbook
+- [x] **C4** **DONE** — Wrangler authenticated; `B2_READ_KEY_ID` and `B2_READ_APP_KEY` set as Worker secrets; deployed. Set the two secrets with `wrangler secret put`, one at a time: `B2_READ_KEY_ID`, `B2_READ_APP_KEY`. Deploy. **The custom domain route creates the `files` DNS record automatically**
+- [x] **C5** **DONE** — `files.cyberjayahappenings.me` confirmed as an active Worker custom domain, with the proxied DNS record wrangler created (Workers & Pages → the Worker → Settings → Domains), and that a proxied `files` DNS record exists
+- [x] **C6** **DONE (2026-10-01).** `curl -sI https://files.cyberjayahappenings.me/<key>.webp` twice, with a real rekeyed key. **The second response must show `x-cache: HIT` — the Worker's own header, not `cf-cache-status`,** which is not reliable for a response served out of the Cache API. Confirm `cache-control: public, max-age=31536000, immutable`, `content-type: image/webp`, an `etag`, and no `x-amz-*`/`x-bz-*`. A malformed path returns 404, a `POST` returns 405, and a well-formed key that does not exist returns 404 with `cache-control: public, max-age=60`. The apex `/up` still returns 200
+- [x] **C7** **DONE** — `PUBLIC_IMAGE_BASE_URL=https://files.cyberjayahappenings.me` set in the box's `.env`, app restarted · §3. Note it is currently inert: `ObjectStore#get_url` still has zero callers, so no rendered URL changes until Phase 5's public pages exist
 - [x] **C8** *(cleanup, done after C6 passed)* Removed the one-off rekey task, `ImageRekeyer`, its tests, and `ObjectStore#copy`/`#exists?` in one commit; the runbook's live rekey commands are now a past-tense note (2026-09-30, 316 rows rekeyed, 5 failed, tooling last present at `8ab89a171e44018cb17ff7c26b7916faa9d18fae`). Keep `~/images-before-rekey.sql` for a few days, then delete it. **The old extensionless B2 objects were not deleted**
 
 ## 10. Known, deliberately

@@ -2,7 +2,7 @@
 
 Ordered, copy-pasteable. `DEPLOYMENT_IMPLEMENTATION_PLAN.MD` is *why* each step exists; this file is *what to type*, in order, with a stop-gate at each risky point. Read it once before starting — do not run steps out of order, because out-of-order failures are ambiguous.
 
-**State:** A1 (repo fixes) done and verified locally. B1–B3 done (domain `cyberjayahappenings.me`, Cloudflare zone **Active**). Everything below is unticked. C0 — the image-key extension fix — landed 2026-09-30, and the one-off rekey (Step 4b) has already run on the box: **316 rows rekeyed, 5 junk rows failed**. No live rekey step remains.
+**State (2026-10-01): the deploy is DONE and verified.** A1–A7, B1–B8 (including the `www` redirect) and C0–C8 are complete: the app serves `https://cyberjayahappenings.me/up` → 200 through the `clubsync` tunnel, the host crontab runs `clubsync:ingest` every 2 days, healthchecks.io is verified with its `#clubsync-alerts` Discord integration, and images come from `https://files.cyberjayahappenings.me` via the Worker over a **private** B2 bucket (`x-cache: HIT` on a repeat request). This file is kept as the **re-run path** for a rebuilt box, not as a worklist — every step below has been executed at least once. C0's one-off rekey (Step 4b) also already ran: 316 rows rekeyed, 5 junk rows failed, no live rekey step remains.
 
 ---
 
