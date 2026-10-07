@@ -1,0 +1,227 @@
+<%# THROWAWAY design test — dev only. Not the public events page.
+    Layout px measured off Dice; don't "improve" them.
+    Palette: #000 #fff #111 #222 #333 #3d3d3d #555 #808080 #959595 #eee #0000fe #f2ef1d (the drawer adds #bbb).
+    Filters and nav are NOT wired. ?ui= and ?view= only swap which static state is drawn.
+    The drawer's "content" target is what goes inert while the drawer is open, so it
+    must wrap the header, the dev pill and the grid and nothing else. %>
+<% ui = %w[idle date menu groups].include?(params[:ui]) ? params[:ui] : "idle" %>
+<% view = params[:view] == "past" ? "past" : "upcoming" %>
+<% handles = @cards.filter_map { |c| c[:handle].presence }.uniq.sort %>
+<% pill = "inline-flex h-[50px] items-center gap-2 rounded-md border bg-[#222222] pl-4 text-xs leading-3 font-bold uppercase text-white" %>
+<div class="min-h-screen bg-black px-4 pb-28 text-white [font-family:Favorit,Helvetica,Arial,sans-serif]"
+     data-controller="design-grid design-drawer"
+     data-design-grid-mode-value="<%= @mode %>">
+
+  <div data-design-drawer-target="content">
+
+    <%# Dev pill: bottom-center so it never covers the header %>
+    <div class="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-full border border-[#555555] bg-[#111111] px-3 py-2 text-xs">
+      <div class="flex items-center gap-1">
+        <% @modes.each do |mode| %>
+          <%= link_to mode, design_grid_path(mode: mode, ui: ui, view: view),
+                data: { turbo: false },
+                class: class_names(
+                  "rounded-full px-2.5 py-1 font-medium",
+                  mode == @mode ? "bg-white text-black" : "text-[#555555] hover:text-white"
+                ) %>
+        <% end %>
+      </div>
+      <div class="mt-1 text-center text-[11px] text-[#555555]">
+        <span class="font-medium text-white"><%= @mode %></span>
+        &middot; cover <span data-design-grid-target="cover" class="text-white">&ndash;</span>
+        &middot; contain <span data-design-grid-target="contain" class="text-white">&ndash;</span>
+      </div>
+      <div class="mt-1 flex items-center justify-center gap-1">
+        <% %w[idle date menu groups].each do |state| %>
+          <%= link_to state, design_grid_path(mode: @mode, ui: state, view: view),
+                data: { turbo: false },
+                class: class_names(
+                  "rounded-full px-2.5 py-1 font-medium",
+                  state == ui ? "bg-white text-black" : "text-[#555555] hover:text-white"
+                ) %>
+        <% end %>
+      </div>
+    </div>
+
+    <%# ---- Header: 96px tall, full-bleed, 96px side padding (16px below lg).
+        Order: logo space | search pill | links | sign-in pill. Everything is centred vertically. ---- %>
+    <header class="-mx-4 flex h-24 items-center gap-6 px-4 lg:px-24">
+      <%# Empty space where the logo goes (~106 x 38) %>
+      <div class="hidden h-[38px] w-[106px] shrink-0 md:block" aria-hidden="true"></div>
+
+      <%# Search pill: 370 x 48, #333, fully rounded %>
+      <label class="flex h-12 w-full min-w-0 max-w-[370px] items-center gap-3 rounded-full bg-[#333333] px-5">
+        <svg class="size-4 shrink-0 text-white" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+          <circle cx="7" cy="7" r="5" /><path d="M11 11l3.5 3.5" />
+        </svg>
+        <input type="text" aria-label="Search events"
+               placeholder="Search by event, venue or group"
+               class="w-full min-w-0 bg-transparent text-base font-medium text-white outline-none placeholder:text-white">
+      </label>
+
+      <nav class="ml-auto flex shrink-0 items-center">
+        <%# Menu links: 16px / 19px, white, 40px apart. Shown from xl up (breakpoint is a guess). %>
+        <div class="hidden items-center gap-10 xl:flex">
+          <a href="#" class="block text-base leading-[19px] text-white">Browse posts</a>
+          <a href="#" class="block text-base leading-[19px] text-white">About</a>
+          <a href="#" class="block text-base leading-[19px] text-white">Create Event</a>
+        </div>
+        <%# Sign-in pill: white, black text, 20px radius, 12px bold uppercase, 0.72px tracking %>
+        <a href="#"
+           class="ml-[30px] flex h-10 items-center justify-center rounded-[20px] border-[1.6px] border-transparent bg-white px-6 text-xs leading-4 font-bold uppercase tracking-[0.72px] text-black transition-opacity duration-200 ease-[ease] hover:opacity-80">
+          Log in / Sign up
+        </a>
+      </nav>
+    </header>
+
+    <div class="mx-auto max-w-6xl">
+
+      <%# Filter row: 50px tall controls, 8px apart, 8px under the header.
+          The Upcoming/Past switcher is pushed to the right edge with ml-auto. %>
+      <div class="mb-8 mt-2 flex flex-wrap items-center gap-2">
+
+        <%# Category dropdown trigger + panel %>
+        <div class="relative">
+          <button type="button" aria-haspopup="listbox" aria-expanded="<%= ui == "menu" %>"
+                  class="<%= class_names(pill, "pr-4", ui == "menu" ? "border-white" : "border-transparent") %>">
+            <svg class="size-4 shrink-0" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true">
+              <path d="M2 2h5.5l6.5 6.5-5.5 5.5L2 7.5V2z" /><circle cx="5" cy="5" r="1" />
+            </svg>
+            All categories
+          </button>
+
+          <% if ui == "menu" %>
+            <%# Panel: 296px wide, white, ~8px radius, search row 48px, option rows 38px.
+                Tag names below are placeholders. Swap for the real EventTags list when wiring. %>
+            <div role="listbox" aria-label="Categories"
+                 class="absolute left-0 top-full z-40 mt-2 w-[296px] overflow-hidden rounded-lg bg-white text-black">
+              <label class="mx-4 flex h-12 items-center gap-4 border-b border-[#eeeeee] pl-1">
+                <svg class="size-4 shrink-0" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+                  <circle cx="7" cy="7" r="5" /><path d="M11 11l3.5 3.5" />
+                </svg>
+                <input type="text" aria-label="Find a category" placeholder="Find a category"
+                       class="w-full bg-transparent text-base text-black outline-none placeholder:text-[#808080]">
+              </label>
+              <ul class="mt-2 max-h-[352px] overflow-y-auto pb-2 [scrollbar-width:thin]">
+                <% ["All categories", "Tech", "Workshop", "Social", "Sports", "Career", "Arts & Culture", "Competition", "Talk", "Volunteering"].each_with_index do |tag, i| %>
+                  <li role="option" aria-selected="<%= i.zero? %>"
+                      class="<%= class_names("flex h-[38px] cursor-pointer items-center px-4 text-base", i.zero? ? "bg-[#eeeeee] text-[#0000fe]" : "text-black") %>">
+                    <%= tag %>
+                  </li>
+                <% end %>
+              </ul>
+            </div>
+          <% end %>
+        </div>
+
+        <%# Date range: empty state "DATE", selected state shows the range plus a muted close icon.
+            The range text is static sample copy. %>
+        <button type="button"
+                class="<%= class_names(pill, ui == "date" ? "pr-3 border-white" : "pr-4 border-transparent") %>">
+          <svg class="size-4 shrink-0" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+            <rect x="2" y="3" width="12" height="11" rx="1.5" /><path d="M2 6.5h12M5 1.5v3M11 1.5v3" />
+          </svg>
+          <% if ui == "date" %>
+            <span>21 Oct</span>
+            <svg class="size-4 shrink-0" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M2 8h12M9 3l5 5-5 5" />
+            </svg>
+            <span>29 Oct</span>
+            <%# Close icon: a separate button when wired %>
+            <svg class="ml-1 size-2.5 shrink-0 text-[#ffffff54]" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" aria-hidden="true">
+              <path d="M1 1l8 8M9 1L1 9" />
+            </svg>
+          <% else %>
+            Date
+          <% end %>
+        </button>
+
+        <%# Groups dropdown trigger + panel (same panel as categories; rows list the real handles on the page) %>
+        <div class="relative">
+          <button type="button" aria-haspopup="listbox" aria-expanded="<%= ui == "groups" %>"
+                  class="<%= class_names(pill, "pr-4", ui == "groups" ? "border-white" : "border-transparent") %>">
+            <svg class="size-4 shrink-0" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+              <circle cx="6" cy="5.5" r="2.5" /><path d="M1.5 13.5c0-2.5 2-4 4.5-4s4.5 1.5 4.5 4" />
+              <circle cx="11.5" cy="6" r="2" /><path d="M12 9.5c1.8.2 3 1.4 3 3.5" />
+            </svg>
+            All groups
+          </button>
+
+          <% if ui == "groups" %>
+            <div role="listbox" aria-label="Groups"
+                 class="absolute left-0 top-full z-40 mt-2 w-[296px] overflow-hidden rounded-lg bg-white text-black">
+              <label class="mx-4 flex h-12 items-center gap-4 border-b border-[#eeeeee] pl-1">
+                <svg class="size-4 shrink-0" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+                  <circle cx="7" cy="7" r="5" /><path d="M11 11l3.5 3.5" />
+                </svg>
+                <input type="text" aria-label="Find a group" placeholder="Find a group"
+                       class="w-full bg-transparent text-base text-black outline-none placeholder:text-[#808080]">
+              </label>
+              <ul class="mt-2 max-h-[352px] overflow-y-auto pb-2 [scrollbar-width:thin]">
+                <li role="option" aria-selected="true"
+                    class="flex h-[38px] cursor-pointer items-center bg-[#eeeeee] px-4 text-base text-[#0000fe]">All groups</li>
+                <% handles.each do |handle| %>
+                  <%# Avatar is an initial placeholder; swap for the account's profile picture when wiring %>
+                  <li role="option" aria-selected="false" class="flex h-[38px] cursor-pointer items-center gap-3 px-4 text-base text-black">
+                    <span class="flex size-6 shrink-0 items-center justify-center rounded-full bg-[#333333] text-[10px] leading-none font-bold text-white"><%= handle[0].upcase %></span>
+                    <span class="truncate">@<%= handle %></span>
+                  </li>
+                <% end %>
+              </ul>
+            </div>
+          <% end %>
+        </div>
+
+        <%# Upcoming / Past switcher (Luma's segmented control: track + sliding thumb + two equal labels).
+            Track is #222 like the buttons, 50px tall, 2px padding, 6px radius; the thumb's radius is
+            the track's minus the padding (4px), same rule as Luma's calc(). The thumb is a separate
+            element so a Stimulus controller can slide it later; here it's just drawn in place. %>
+        <div class="relative ml-auto inline-grid h-[50px] grid-cols-2 rounded-md bg-[#222222] p-0.5">
+          <span aria-hidden="true"
+                class="<%= class_names("absolute inset-y-0.5 left-0.5 w-[calc(50%-2px)] rounded-[4px] bg-[#3d3d3d] transition-transform duration-300 ease-[cubic-bezier(.4,0,.2,1)]", view == "past" && "translate-x-full") %>"></span>
+          <% %w[upcoming past].each do |tab| %>
+            <%= link_to tab.capitalize, design_grid_path(mode: @mode, ui: ui, view: tab),
+                  data: { turbo: false },
+                  aria: { current: (tab == view ? "page" : nil) },
+                  class: class_names(
+                    "relative z-10 flex items-center justify-center px-4 text-xs leading-3 font-bold uppercase transition-colors duration-200 ease-[cubic-bezier(.4,0,.2,1)]",
+                    tab == view ? "text-white" : "text-[#959595] hover:text-white"
+                  ) %>
+          <% end %>
+        </div>
+      </div>
+
+      <h2 class="mb-10 text-[38px] leading-[45px] font-normal tracking-[-0.38px] text-white">Events</h2>
+
+      <div class="grid grid-cols-2 gap-x-8 gap-y-10 md:grid-cols-3 xl:grid-cols-4">
+        <% @cards.each do |card| %>
+          <%# A real <button> gives click, Enter and Space, and focus, for free. The focus
+              ring is an outline (not a ring/box-shadow) so it can never move layout. %>
+          <button type="button"
+                  data-event-id="<%= card[:event_id] %>"
+                  class="w-full cursor-pointer text-left focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-2">
+            <div data-design-grid-target="poster"
+                 class="aspect-[4/5] overflow-hidden rounded-md bg-[#111111]">
+              <img src="<%= card[:image_url] %>" alt="" loading="lazy" decoding="async"
+                   class="h-full w-full">
+            </div>
+
+            <div class="mt-2 [overflow-wrap:anywhere]">
+              <p class="mb-1 line-clamp-2 text-base leading-5 font-normal text-white"><%= card[:title] %></p>
+              <% if card[:date] %>
+                <p class="mb-0.5 text-sm leading-[17.5px] text-[#f2ef1d]"><%= card[:date].strftime("%a, %b %-d") %></p>
+              <% end %>
+              <% if card[:venue].present? %>
+                <p class="mb-0.5 text-sm leading-[17.5px] text-white"><%= card[:venue] %></p>
+              <% end %>
+              <p class="mb-0.5 text-sm leading-[17.5px] text-white">@<%= card[:handle] %></p>
+            </div>
+          </button>
+        <% end %>
+      </div>
+    </div>
+  </div>
+
+  <script type="application/json" id="drawer-events"><%= raw @drawer_events.to_json %></script>
+  <%= render "drawer" %>
+</div>

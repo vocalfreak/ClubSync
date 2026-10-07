@@ -12,4 +12,11 @@ Rails.application.routes.draw do
 
   # Defines the root path route ("/")
   # root "posts#index"
+
+  # Throwaway design test (dev only, no auth, not linked from anywhere).
+  if Rails.env.development?
+    namespace :design do
+      get "grid", to: "grid#index"
+    end
+  end
 end

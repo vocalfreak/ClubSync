@@ -1,0 +1,128 @@
+<%# THROWAWAY drawer — dev only, visual test of the overlay. Delete with app/views/design/.
+    Backdrop above the fixed mode pill (z-50); drawer above the backdrop.
+    Palette: #000 #fff #111 #222 #232323 #333 #555 #bbb #f2ef1d only (#232323 is the Luma surface).
+    Every per-event slot below is filled from #drawer-events with textContent — the
+    caption is untrusted Instagram text, so nothing here is ever built from markup.
+    Image frame: same 4:5 / rounded-md / #111 as the index posters, but the controller swaps the
+    ratio and fit per grid mode (applyFrameShape / fitImage). The arrows sit on the frame and the dots
+    sit under it. They are shown and hidden with the `hidden` attribute, never a utility class, so
+    their flex centering survives. `[&[hidden]]:hidden` makes that work on any Tailwind version. %>
+<% button = "flex items-center justify-center rounded-md border border-[#333333] bg-[#222222] px-2 text-sm text-white" %>
+<% glyph = "#{button} h-8 w-8 disabled:cursor-not-allowed disabled:border-[#222222] disabled:text-[#555555]" %>
+<% inert_button = "rounded-md border border-[#333333] bg-[#222222] px-3 py-1.5 text-sm text-white" %>
+<% slide_arrow = "absolute top-1/2 flex size-[30px] -translate-y-1/2 items-center justify-center rounded-full bg-[#bbbbbb]/90 text-black transition-opacity hover:opacity-80 [&[hidden]]:hidden" %>
+<%# Luma header buttons: "naked" (icon only, no fill) and "light solid" (white 8% fill, white 64% text) %>
+<% naked = "flex h-8 w-8 items-center justify-center rounded-lg text-white/[.64] transition-colors duration-200 ease-[cubic-bezier(.4,0,.2,1)] hover:text-white" %>
+<% light = "flex h-8 items-center gap-1.5 rounded-lg bg-white/[.08] px-3 text-sm font-medium text-white/[.64] transition-colors duration-200 ease-[cubic-bezier(.4,0,.2,1)] hover:bg-white/[.16] hover:text-white" %>
+
+<div data-design-drawer-target="backdrop"
+     class="pointer-events-none fixed inset-0 z-[60] bg-black/60 opacity-0 transition-opacity duration-200"></div>
+
+<%# No outer border on the drawer itself. %>
+<aside data-design-drawer-target="drawer"
+       role="dialog"
+       aria-modal="true"
+       aria-hidden="true"
+       inert
+       class="pointer-events-none fixed inset-y-0 right-0 z-[70] w-full max-w-full translate-x-full overflow-y-auto bg-[#232323] text-white transition-transform duration-200 ease-out md:w-[550px]">
+
+  <div class="sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-[#333333] bg-[#232323] px-3 py-2">
+    <div class="flex items-center gap-2">
+      <%# Collapse: closes the drawer %>
+      <button type="button" data-design-drawer-target="close" class="<%= naked %>" aria-label="Close">
+        <svg class="size-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m13 17 5-5-5-5M6 17l5-5-5-5" /></svg>
+      </button>
+
+      <%# Copy Link: the controller swaps only the label span to "Copied", so the icon stays %>
+      <button type="button" data-design-drawer-target="copy" class="<%= light %>">
+        <svg class="size-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V6a2 2 0 0 1 2-2h9" /></svg>
+        <span data-design-drawer-target="copyLabel">Copy Link</span>
+      </button>
+
+      <%# Event Page: not wired, there is no event page route yet %>
+      <button type="button" class="<%= light %>">
+        Event Page
+        <svg class="size-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9" /></svg>
+      </button>
+    </div>
+    <div class="flex items-center gap-2">
+      <button type="button" data-design-drawer-target="fullscreen" class="<%= glyph %>" aria-label="Fullscreen">&#x26F6;</button>
+      <button type="button" data-design-drawer-target="prev" class="<%= glyph %>" aria-label="Previous event">&lsaquo;</button>
+      <button type="button" data-design-drawer-target="next" class="<%= glyph %>" aria-label="Next event">&rsaquo;</button>
+    </div>
+  </div>
+
+  <%# Image frame: arrows are 30px circles, 8px in from each edge, centred on the frame.
+      Dots: 12px above, 4px below, centred (Instagram's xz9dl7a / xjkvuk6 / xl56j7k / x78zum5). %>
+  <div class="px-4 pt-4">
+    <%# Same box as an index poster. The ratio below is only the default — the controller
+        overrides it per grid mode (applyFrameShape) so the drawer matches the card that opened
+        it. max-w-[330px] is the card width in your screenshots; it's the one number to change
+        for a larger or smaller image. The track is absolutely positioned so it fills the frame
+        whatever the image's own size. The 1px border is white at 8% (Luma's --opacity-8 hairline);
+        it sits on the frame, so the track and images are inset inside it. %>
+    <div data-design-drawer-target="frame"
+         class="relative mx-auto aspect-[4/5] w-full max-w-[330px] overflow-hidden rounded-md border border-white/[.08] bg-[#111111]">
+      <div data-design-drawer-target="track"
+           class="absolute inset-0 flex snap-x snap-mandatory overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"></div>
+
+      <button type="button" hidden data-design-drawer-target="slidePrev"
+              class="<%= slide_arrow %> left-2"
+              aria-label="Previous image">
+        <svg class="size-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3L5 8l5 5" /></svg>
+      </button>
+      <button type="button" hidden data-design-drawer-target="slideNext"
+              class="<%= slide_arrow %> right-2"
+              aria-label="Next image">
+        <svg class="size-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3l5 5-5 5" /></svg>
+      </button>
+    </div>
+
+    <div hidden data-design-drawer-target="dots"
+         class="flex justify-center gap-1 pt-3 pb-1 [&[hidden]]:hidden" aria-hidden="true"></div>
+  </div>
+
+  <div class="px-4 pt-4 pb-8">
+    <h3 data-design-drawer-target="title" class="text-[23px] leading-[29px] font-bold text-white"></h3>
+
+    <div class="mt-1">
+      <p data-design-drawer-target="date" class="text-sm leading-[19px] text-[#f2ef1d]"></p>
+      <p data-design-drawer-target="venue" class="text-sm leading-[19px] text-white"></p>
+      <p class="text-sm leading-[19px]">
+        <a data-design-drawer-target="handle" href="#" target="_blank" rel="noopener noreferrer" class="text-[#bbbbbb]"></a>
+      </p>
+    </div>
+
+    <a data-design-drawer-target="instagram" href="#" target="_blank" rel="noopener noreferrer"
+       class="mt-3 inline-block text-sm leading-[19px] text-white underline">Original post on Instagram &#8599;</a>
+
+    <div class="mt-5">
+      <p class="text-sm leading-[19px] text-[#bbbbbb]">Original caption</p>
+      <p data-design-drawer-target="caption" class="mt-1 whitespace-pre-line text-base leading-[22.4px] text-white"></p>
+    </div>
+
+    <div class="mt-5 rounded-md border border-[#333333] bg-[#222222] p-3">
+      <p class="text-sm leading-[19px] text-[#f2ef1d]">Heads up</p>
+      <p class="mt-1 text-sm leading-[19px] text-[#bbbbbb]">This information was extracted automatically and may be inaccurate. Check the original post.</p>
+    </div>
+
+    <div class="mt-5">
+      <p class="text-sm leading-[19px] font-medium text-white">Rate this post</p>
+      <div class="mt-2 flex flex-wrap gap-2">
+        <button type="button" class="<%= inert_button %>">This is an event</button>
+        <button type="button" class="<%= inert_button %>">Not an event</button>
+      </div>
+      <p class="mt-2 text-xs text-[#555555]">Design test only, not wired.</p>
+    </div>
+
+    <div class="mt-5">
+      <p class="text-sm leading-[19px] font-medium text-white">Admin</p>
+      <div class="mt-2 flex flex-wrap gap-2">
+        <button type="button" class="<%= inert_button %>">Switch event / non-event</button>
+        <button type="button" class="<%= inert_button %>">Edit fields</button>
+        <button type="button" class="<%= inert_button %>">Group duplicates</button>
+      </div>
+      <p class="mt-2 text-xs text-[#555555]">Design test only, not wired.</p>
+    </div>
+  </div>
+</aside>
